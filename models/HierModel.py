@@ -21,11 +21,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import misc.utils as utils
+import copy
+import math
+import numpy as np
 from torch.nn.utils.rnn import PackedSequence, pack_padded_sequence, pad_packed_sequence
 
 from .CaptionModel import CaptionModel
 
-import ipdb
 
 def sort_pack_padded_sequence(input, lengths):
     sorted_lengths, indices = torch.sort(lengths, descending=True)
@@ -46,9 +48,9 @@ def pack_wrapper(module, att_feats, att_masks):
     else:
         return module(att_feats)
 
-class AttModel(CaptionModel):
+class HierModel(CaptionModel):
     def __init__(self, opt):
-        super(AttModel, self).__init__()
+        super(HierModel, self).__init__()
         self.vocab_size = opt.vocab_size
         self.input_encoding_size = opt.input_encoding_size
         #self.rnn_type = opt.rnn_type
@@ -59,33 +61,40 @@ class AttModel(CaptionModel):
         self.fc_feat_size = opt.fc_feat_size
         self.att_feat_size = opt.att_feat_size
         self.att_hid_size = opt.att_hid_size
+        self.fs_index = opt.fs_index
 
         self.use_bn = getattr(opt, 'use_bn', 0)
+        self.relu_mod = getattr(opt, 'relu_mod', 'relu')
+        self.rela_index = getattr(opt, 'rela_index', 0)
 
         self.ss_prob = 0.0 # Schedule sampling probability
 
-        # This word embedding should be initialized with the BERT pretrained word embeddings
-        # self.embed = nn.Sequential(nn.Embedding(self.vocab_size + 1, self.input_encoding_size),
-        #                         nn.ReLU(),
-        #                         nn.Dropout(self.drop_prob_lm))
-        self.embed = nn.Embedding(self.vocab_size + 1, self.input_encoding_size)
-
-        self.fc_embed = nn.Sequential(nn.Linear(self.fc_feat_size, self.rnn_size),
-                                    nn.ReLU(),
-                                    nn.Dropout(self.drop_prob_lm))
-        self.att_embed = nn.Sequential(*(
-                                    ((nn.BatchNorm1d(self.att_feat_size),) if self.use_bn else ())+
-                                    (nn.Linear(self.att_feat_size, self.rnn_size),
-                                    nn.ReLU(),
-                                    nn.Dropout(self.drop_prob_lm))+
-                                    ((nn.BatchNorm1d(self.rnn_size),) if self.use_bn==2 else ())))
+        if self.relu_mod == 'relu':
+            self.embed = nn.Embedding(self.vocab_size + 1, self.input_encoding_size)
+            self.fc_embed = nn.Sequential(nn.Linear(self.fc_feat_size, self.rnn_size),
+                                        nn.ReLU(inplace=True),
+                                        nn.Dropout(self.drop_prob_lm))
+            self.att_embed = nn.Sequential(*(
+                                        ((nn.BatchNorm1d(self.att_feat_size),) if self.use_bn else ())+
+                                        (nn.Linear(self.att_feat_size, self.rnn_size),
+                                        nn.ReLU(inplace=True),
+                                        nn.Dropout(self.drop_prob_lm))+
+                                        ((nn.BatchNorm1d(self.rnn_size),) if self.use_bn==2 else ())))
+        elif self.relu_mod == 'leaky_relu':
+            self.embed = nn.Embedding(self.vocab_size + 1, self.input_encoding_size)
+            self.fc_embed = nn.Sequential(nn.Linear(self.fc_feat_size, self.rnn_size),
+                                          nn.LeakyReLU(0.1, inplace=True),
+                                          nn.Dropout(self.drop_prob_lm))
+            self.att_embed = nn.Sequential(*(
+                    ((nn.BatchNorm1d(self.att_feat_size),) if self.use_bn else ()) +
+                    (nn.Linear(self.att_feat_size, self.rnn_size),
+                     nn.LeakyReLU(0.1, inplace=True),
+                     nn.Dropout(self.drop_prob_lm)) +
+                    ((nn.BatchNorm1d(self.rnn_size),) if self.use_bn == 2 else ())))
 
         self.logit_layers = getattr(opt, 'logit_layers', 1)
         if self.logit_layers == 1:
             self.logit = nn.Linear(self.rnn_size, self.vocab_size + 1)
-        else:
-            self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 1)]
-            self.logit = nn.Sequential(*(reduce(lambda x,y:x+y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
         self.ctx2att = nn.Linear(self.rnn_size, self.att_hid_size)
 
     def init_BERT_embeddings(self, embedding_weights):
@@ -109,6 +118,8 @@ class AttModel(CaptionModel):
 
         # embed fc and att feats
         fc_feats = self.fc_embed(fc_feats)
+        if self.rela_index:
+            att_feats = self.rela_mod(att_feats, att_masks)
         att_feats = pack_wrapper(self.att_embed, att_feats, att_masks)
 
         # Project the attention feats first to reduce memory and computation comsumptions.
@@ -116,11 +127,13 @@ class AttModel(CaptionModel):
 
         return fc_feats, att_feats, p_att_feats
 
-    def _forward(self, bert_feats, fc_feats, att_feats, seq, att_masks=None):
+    def _forward(self, bert_feats, sen_bert_feats, fc_feats, att_feats, seq, att_masks=None):
         att_feats, att_masks = self.clip_att(att_feats, att_masks)
 
         batch_size = fc_feats.size(0)
         state = self.init_hidden(batch_size)
+        old_state = fc_feats.new_zeros(batch_size, self.rnn_size)
+        old_att = fc_feats.new_zeros(batch_size, self.rnn_size)
 
         # outputs = []
         outputs = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size+1)
@@ -136,9 +149,6 @@ class AttModel(CaptionModel):
                 else:
                     sample_ind = sample_mask.nonzero().view(-1)
                     it = seq[:, i].data.clone()
-                    #prob_prev = torch.exp(outputs[-1].data.index_select(0, sample_ind)) # fetch prev distribution: shape Nx(M+1)
-                    #it.index_copy_(0, sample_ind, torch.multinomial(prob_prev, 1).view(-1))
-                    # prob_prev = torch.exp(outputs[-1].data) # fetch prev distribution: shape Nx(M+1)
                     prob_prev = torch.exp(outputs[:, i-1].detach()) # fetch prev distribution: shape Nx(M+1)
                     it.index_copy_(0, sample_ind, torch.multinomial(prob_prev, 1).view(-1).index_select(0, sample_ind))
             else:
@@ -147,25 +157,28 @@ class AttModel(CaptionModel):
             if i >= 1 and seq[:, i].sum() == 0:
                 break
 
-            output, state = self.get_logprobs_state(it, bert_feats[:, i, :], fc_feats, att_feats, p_att_feats, att_masks, state)
+            output, state, old_state, old_att = self.get_logprobs_state(it, bert_feats[:,i,:], sen_bert_feats[:,i,:], fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att)
             outputs[:, i] = output
             # outputs.append(output)
 
         return outputs
         # return torch.cat([_.unsqueeze(1) for _ in outputs], 1)
 
-    def get_logprobs_state(self, it, bert_feats, fc_feats, att_feats, p_att_feats, att_masks, state):
-        # 'it' contains a word index (batch_size * 1)
+    def get_logprobs_state(self, it, bert_feats, sen_bert_feats, fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att):
+        # 'it' contains a word index
         # xt = self.embed(it)
-        
-        # BERT version of this; xt:(batch_size * 1 * 768)
-        xt = bert_feats
-        xt.requires_grad = False
 
-        output, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
+        # BERT version of this; xt:(batch_size * 1 * 768)
+        st = sen_bert_feats
+        xt = bert_feats
+        st.requires_grad = False
+        xt.requires_grad = False            
+        cs_index = it==int(self.fs_index)
+
+        output, state, old_state, old_att = self.core(st, xt, cs_index, fc_feats, att_feats, p_att_feats, state, old_state, old_att, att_masks)
         logprobs = F.log_softmax(self.logit(output), dim=1)
 
-        return logprobs, state
+        return logprobs, state, old_state, old_att
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
         beam_size = opt.get('beam_size', 10)
@@ -195,10 +208,7 @@ class AttModel(CaptionModel):
         # return the samples and their log likelihoods
         return seq.transpose(0, 1), seqLogprobs.transpose(0, 1)
 
-    def _sample(self, bert_feats, fc_feats, att_feats, att_masks=None, opt={}):
-
-        # ipdb.set_trace()
-
+    def _sample(self, bert_feats, sen_bert_feats, fc_feats, att_feats, att_masks=None, opt={}):
         att_feats, att_masks = self.clip_att(att_feats, att_masks)
 
         sample_max = opt.get('sample_max', 1)
@@ -211,7 +221,8 @@ class AttModel(CaptionModel):
 
         batch_size = fc_feats.size(0)
         state = self.init_hidden(batch_size)
-
+        old_state = fc_feats.new_zeros(batch_size, self.rnn_size)
+        old_att = fc_feats.new_zeros(batch_size, self.rnn_size)
         fc_feats, att_feats, p_att_feats = self._prepare_feature(fc_feats, att_feats, att_masks)
 
         # BEG MODIFIED
@@ -253,8 +264,7 @@ class AttModel(CaptionModel):
                 # seqLogprobs.append(sampleLogprobs.view(-1))
                 seqLogprobs[:,t-1] = sampleLogprobs.view(-1)
 
-            # ipdb.set_trace()
-            logprobs, state = self.get_logprobs_state(it, bert_feats[:, t, :], fc_feats, att_feats, p_att_feats, att_masks, state)
+            logprobs, state, old_state, old_att = self.get_logprobs_state(it, bert_feats[:,t,:], sen_bert_feats[:,t,:], fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att)
 
             if decoding_constraint and t > 0:
                 tmp = output.new_zeros(output.size(0), self.vocab_size + 1)
@@ -291,212 +301,51 @@ class AttModel(CaptionModel):
                 alpha = 2.0 # = 4
                 logprobs = logprobs + (mask * -0.693 * alpha) # ln(1/2) * alpha (alpha -> infty works best)
 
-
-                # Length penalty
-                #penalty = 1.00
-                #formula = penalty**t  # (5 + t)**penalty / (5 + 1)**penalty
-                #helper = (torch.ones(logprobs.shape) - (1.0 - formula) * (torch.arange(logprobs.shape[1]).expand(logprobs.shape) <= 1).float()).cuda() 
-                #logprobs = logprobs * helper 
-                
             # END MODIFIED ----------------------------------------------------
 
         return seq, seqLogprobs
         # return torch.cat([_.unsqueeze(1) for _ in seq], 1), torch.cat([_.unsqueeze(1) for _ in seqLogprobs], 1)
 
-class AdaAtt_lstm(nn.Module):
-    def __init__(self, opt, use_maxout=True):
-        super(AdaAtt_lstm, self).__init__()
-        self.input_encoding_size = opt.input_encoding_size
-        #self.rnn_type = opt.rnn_type
-        self.rnn_size = opt.rnn_size
-        self.num_layers = opt.num_layers
-        self.drop_prob_lm = opt.drop_prob_lm
-        self.fc_feat_size = opt.fc_feat_size
-        self.att_feat_size = opt.att_feat_size
-        self.att_hid_size = opt.att_hid_size
 
-        self.use_maxout = use_maxout
-
-        # Build a LSTM
-        self.w2h = nn.Linear(self.input_encoding_size, (4+(use_maxout==True)) * self.rnn_size)
-        self.v2h = nn.Linear(self.rnn_size, (4+(use_maxout==True)) * self.rnn_size)
-
-        self.i2h = nn.ModuleList([nn.Linear(self.rnn_size, (4+(use_maxout==True)) * self.rnn_size) for _ in range(self.num_layers - 1)])
-        self.h2h = nn.ModuleList([nn.Linear(self.rnn_size, (4+(use_maxout==True)) * self.rnn_size) for _ in range(self.num_layers)])
-
-        # Layers for getting the fake region
-        if self.num_layers == 1:
-            self.r_w2h = nn.Linear(self.input_encoding_size, self.rnn_size)
-            self.r_v2h = nn.Linear(self.rnn_size, self.rnn_size)
-        else:
-            self.r_i2h = nn.Linear(self.rnn_size, self.rnn_size)
-        self.r_h2h = nn.Linear(self.rnn_size, self.rnn_size)
-
-
-    def forward(self, xt, img_fc, state):
-
-        hs = []
-        cs = []
-        for L in range(self.num_layers):
-            # c,h from previous timesteps
-            prev_h = state[0][L]
-            prev_c = state[1][L]
-            # the input to this layer
-            if L == 0:
-                x = xt
-                i2h = self.w2h(x) + self.v2h(img_fc)
-            else:
-                x = hs[-1]
-                x = F.dropout(x, self.drop_prob_lm, self.training)
-                i2h = self.i2h[L-1](x)
-
-            all_input_sums = i2h+self.h2h[L](prev_h)
-
-            sigmoid_chunk = all_input_sums.narrow(1, 0, 3 * self.rnn_size)
-            sigmoid_chunk = F.sigmoid(sigmoid_chunk)
-            # decode the gates
-            in_gate = sigmoid_chunk.narrow(1, 0, self.rnn_size)
-            forget_gate = sigmoid_chunk.narrow(1, self.rnn_size, self.rnn_size)
-            out_gate = sigmoid_chunk.narrow(1, self.rnn_size * 2, self.rnn_size)
-            # decode the write inputs
-            if not self.use_maxout:
-                in_transform = F.tanh(all_input_sums.narrow(1, 3 * self.rnn_size, self.rnn_size))
-            else:
-                in_transform = all_input_sums.narrow(1, 3 * self.rnn_size, 2 * self.rnn_size)
-                in_transform = torch.max(\
-                    in_transform.narrow(1, 0, self.rnn_size),
-                    in_transform.narrow(1, self.rnn_size, self.rnn_size))
-            # perform the LSTM update
-            next_c = forget_gate * prev_c + in_gate * in_transform
-            # gated cells form the output
-            tanh_nex_c = F.tanh(next_c)
-            next_h = out_gate * tanh_nex_c
-            if L == self.num_layers-1:
-                if L == 0:
-                    i2h = self.r_w2h(x) + self.r_v2h(img_fc)
-                else:
-                    i2h = self.r_i2h(x)
-                n5 = i2h+self.r_h2h(prev_h)
-                fake_region = F.sigmoid(n5) * tanh_nex_c
-
-            cs.append(next_c)
-            hs.append(next_h)
-
-        # set up the decoder
-        top_h = hs[-1]
-        top_h = F.dropout(top_h, self.drop_prob_lm, self.training)
-        fake_region = F.dropout(fake_region, self.drop_prob_lm, self.training)
-
-        state = (torch.cat([_.unsqueeze(0) for _ in hs], 0), 
-                torch.cat([_.unsqueeze(0) for _ in cs], 0))
-        return top_h, fake_region, state
-
-class AdaAtt_attention(nn.Module):
-    def __init__(self, opt):
-        super(AdaAtt_attention, self).__init__()
-        self.input_encoding_size = opt.input_encoding_size
-        #self.rnn_type = opt.rnn_type
-        self.rnn_size = opt.rnn_size
-        self.drop_prob_lm = opt.drop_prob_lm
-        self.att_hid_size = opt.att_hid_size
-
-        # fake region embed
-        self.fr_linear = nn.Sequential(
-            nn.Linear(self.rnn_size, self.input_encoding_size),
-            nn.ReLU(), 
-            nn.Dropout(self.drop_prob_lm))
-        self.fr_embed = nn.Linear(self.input_encoding_size, self.att_hid_size)
-
-        # h out embed
-        self.ho_linear = nn.Sequential(
-            nn.Linear(self.rnn_size, self.input_encoding_size),
-            nn.Tanh(), 
-            nn.Dropout(self.drop_prob_lm))
-        self.ho_embed = nn.Linear(self.input_encoding_size, self.att_hid_size)
-
-        self.alpha_net = nn.Linear(self.att_hid_size, 1)
-        self.att2h = nn.Linear(self.rnn_size, self.rnn_size)
-
-    def forward(self, h_out, fake_region, conv_feat, conv_feat_embed, att_masks=None):
-
-        # View into three dimensions
-        att_size = conv_feat.numel() // conv_feat.size(0) // self.rnn_size
-        conv_feat = conv_feat.view(-1, att_size, self.rnn_size)
-        conv_feat_embed = conv_feat_embed.view(-1, att_size, self.att_hid_size)
-
-        # view neighbor from bach_size * neighbor_num x rnn_size to bach_size x rnn_size * neighbor_num
-        fake_region = self.fr_linear(fake_region)
-        fake_region_embed = self.fr_embed(fake_region)
-
-        h_out_linear = self.ho_linear(h_out)
-        h_out_embed = self.ho_embed(h_out_linear)
-
-        txt_replicate = h_out_embed.unsqueeze(1).expand(h_out_embed.size(0), att_size + 1, h_out_embed.size(1))
-
-        img_all = torch.cat([fake_region.view(-1,1,self.input_encoding_size), conv_feat], 1)
-        img_all_embed = torch.cat([fake_region_embed.view(-1,1,self.input_encoding_size), conv_feat_embed], 1)
-
-        hA = F.tanh(img_all_embed + txt_replicate)
-        hA = F.dropout(hA,self.drop_prob_lm, self.training)
-        
-        hAflat = self.alpha_net(hA.view(-1, self.att_hid_size))
-        PI = F.softmax(hAflat.view(-1, att_size + 1), dim=1)
-
-        if att_masks is not None:
-            att_masks = att_masks.view(-1, att_size)
-            PI = PI * torch.cat([att_masks[:,:1], att_masks], 1) # assume one one at the first time step.
-            PI = PI / PI.sum(1, keepdim=True)
-
-        visAtt = torch.bmm(PI.unsqueeze(1), img_all)
-        visAttdim = visAtt.squeeze(1)
-
-        atten_out = visAttdim + h_out_linear
-
-        h = F.tanh(self.att2h(atten_out))
-        h = F.dropout(h, self.drop_prob_lm, self.training)
-        return h
-
-class AdaAttCore(nn.Module):
+class HTopDownCore(nn.Module):
     def __init__(self, opt, use_maxout=False):
-        super(AdaAttCore, self).__init__()
-        self.lstm = AdaAtt_lstm(opt, use_maxout)
-        self.attention = AdaAtt_attention(opt)
-
-    def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None):
-        h_out, p_out, state = self.lstm(xt, fc_feats, state)
-        atten_out = self.attention(h_out, p_out, att_feats, p_att_feats, att_masks)
-        return atten_out, state
-
-class TopDownCore(nn.Module):
-    def __init__(self, opt, use_maxout=False):
-        super(TopDownCore, self).__init__()
+        super(HTopDownCore, self).__init__()
         self.drop_prob_lm = opt.drop_prob_lm
 
-        self.att_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size * 2, opt.rnn_size) # we, fc, h^2_t-1
-        self.lang_lstm = nn.LSTMCell(opt.rnn_size * 2, opt.rnn_size) # h^1_t, \hat v
+        self.sen_att_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size * 2, opt.rnn_size) 
+        self.sen_lstm = nn.LSTMCell(opt.rnn_size * 2, opt.rnn_size) # h^1_s, \hat v
+        self.word_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size * 2, opt.rnn_size)
         self.attention = Attention(opt)
 
-    def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None):
-        prev_h = state[0][-1]
-        att_lstm_input = torch.cat([prev_h, fc_feats, xt], 1)
+    def forward(self, st, xt, cs_index, fc_feats, att_feats, p_att_feats, state, old_state, old_att = None, att_masks=None):
 
-        h_att, c_att = self.att_lstm(att_lstm_input, (state[0][0], state[1][0]))
+        ####################sentence level######################
+        prev_h = state[0][1]
+        att_lstm_input = torch.cat([prev_h, st, fc_feats], 1)
 
+        h_att, c_att = self.sen_att_lstm(att_lstm_input, (state[0][0], state[1][0]))
         att = self.attention(h_att, att_feats, p_att_feats, att_masks)
 
-        lang_lstm_input = torch.cat([att, h_att], 1)
-        # lang_lstm_input = torch.cat([att, F.dropout(h_att, self.drop_prob_lm, self.training)], 1) ?????
+        sen_lstm_input = torch.cat([att, h_att], 1)
+        h_sen, c_sen = self.sen_lstm(sen_lstm_input, (state[0][1], state[1][1]))
 
-        h_lang, c_lang = self.lang_lstm(lang_lstm_input, (state[0][1], state[1][1]))
+        ####################word level##########################
+        batch_size = fc_feats.size(0)
+        for batch_id in range(batch_size):
+            if cs_index[batch_id]==1:
+                old_state[batch_id] = h_sen[batch_id]
+        topic_vector = old_state
+        # topic_vector = h_sen
+        prev_h_word = state[0][2]
 
-        output = F.dropout(h_lang, self.drop_prob_lm, self.training)
-        state = (torch.stack([h_att, h_lang]), torch.stack([c_att, c_lang]))
+        word_lstm_input = torch.cat([xt, prev_h_word, topic_vector], 1)
+        h_word, c_word = self.word_lstm(word_lstm_input, (state[0][2], state[1][2]))
 
-        # ipdb.set_trace()
+        output = F.dropout(h_word, self.drop_prob_lm, self.training)
+        state = (torch.stack([h_att, h_sen, h_word]), torch.stack([c_att, c_sen, c_word]))
 
-        return output, state
+        return output, state, old_state, old_att
 
-###########################################################################################################
 
 class Attention(nn.Module):
     def __init__(self, opt):
@@ -529,19 +378,9 @@ class Attention(nn.Module):
 
         return att_res
 
-class AdaAttModel(AttModel):
-    def __init__(self, opt):
-        super(AdaAttModel, self).__init__(opt)
-        self.core = AdaAttCore(opt)
 
-# AdaAtt with maxout lstm
-class AdaAttMOModel(AttModel):
+class HTopDownModel(HierModel):
     def __init__(self, opt):
-        super(AdaAttMOModel, self).__init__(opt)
-        self.core = AdaAttCore(opt, True)
-
-class TopDownModel(AttModel):
-    def __init__(self, opt):
-        super(TopDownModel, self).__init__(opt)
-        self.num_layers = 2
-        self.core = TopDownCore(opt)
+        super(HTopDownModel, self).__init__(opt)
+        self.num_layers = 3
+        self.core = HTopDownCore(opt)

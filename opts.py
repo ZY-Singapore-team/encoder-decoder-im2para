@@ -49,6 +49,8 @@ def parse_opt():
                     help='Cached bert features; if empty, then calculate it from scrach.')
 
     # Model settings
+    parser.add_argument('--caption_model', type=str, default="hierarchical",
+                        help='hierarchical,sct')
     parser.add_argument('--block_trigrams', type=int, default=0,
                     help='flag to block trigrams (0=F, 1=T), default 0')
     parser.add_argument('--alpha', type=float, default=0.0,
@@ -89,7 +91,6 @@ def parse_opt():
                     help='number of captions to sample for each image during training. Done for efficiency since CNN forward pass is expensive. E.g. coco has 5 sents/image')
     parser.add_argument('--beam_size', type=int, default=1,
                     help='used when sample_max = 1, indicates number of beams in beam search. Usually 2 or 3 works well. More is not better. Set this to 1 for faster runtime but a bit worse performance.')
-
     # Optimization: Language Model
     parser.add_argument('--optim', type=str, default='adam',
                     help='what update to use? rmsprop|sgd|sgdmom|adagrad|adam')
@@ -133,6 +134,8 @@ def parse_opt():
                     help='Do we load previous best score when resuming training.')       
 
     # Misc
+    parser.add_argument('--gpu', type=str, default="0",
+                        help='gpu_id')
     parser.add_argument('--id', type=str, default='tmp_test',
                     help='an id identifying this run/job. used in cross-val and appended when writing progress files')
     parser.add_argument('--train_only', type=int, default=0,

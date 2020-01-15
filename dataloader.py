@@ -11,7 +11,7 @@ from functools import reduce
 from transformers import BertModel
 warnings.filterwarnings("ignore")
 
-import ipdb
+# import ipdb
 
 # import multiprocessing
 
@@ -66,12 +66,48 @@ class DataLoader(data.Dataset):
 
         # save bert features
         self.bert_tokens = bert_features
-        return vocab_size
+
+        # get the index of full stop of the dictionary
+        cls_index = 101
+        sep_index = 102
+        max_sent_len = 50
+        self.cls_bert_index = BERT_to_idx[cls_index]
+        self.sep_bert_index = BERT_to_idx[sep_index]
+        print('[CLS] new bert index: ' + str(self.cls_bert_index))
+        print('[SEP] new bert index: ' + str(self.sep_bert_index))
+
+        # rebuild sentence-wise bert content
+        sent_bert_tokens = {}
+        for sent_id, content in bert_features.items():
+            if content['tokens']==[]:
+                continue
+            s_ind = [j for j, t in enumerate(content['tokens']) if t==self.sep_bert_index]
+            sent_content = np.split(content['tokens'], s_ind)[:-2]
+            sent_content = [i[1:] for i in sent_content]
+            new_sent_content = np.zeros((len(sent_content),max_sent_len+2))
+            for i, sent in enumerate(sent_content):
+                new_sent_content[i,0] = self.cls_bert_index
+                for ind, token in enumerate(sent):
+                    if ind < max_sent_len:
+                        new_sent_content[i,ind+1] = token
+                    else:
+                        ind = ind-1
+                        break
+                new_sent_content[i,ind+2] = self.sep_bert_index
+            sent_bert_tokens[sent_id] = new_sent_content.astype(np.int)
+
+        self.sent_bert_tokens = sent_bert_tokens
+
+        self.max_sent_len = max_sent_len
+
+        return vocab_size, self.sep_bert_index
+
 
     def __init__(self, opt):
         self.opt = opt
         self.batch_size = self.opt.batch_size
         self.seq_per_img = opt.seq_per_img
+        self.caption_model = opt.caption_model
 
         # BERT model
         self.bert_model = BertModel.from_pretrained("bert-base-cased")
@@ -88,7 +124,7 @@ class DataLoader(data.Dataset):
         self.ix_to_word = self.info['ix_to_word']
         self.vocab_size = len(self.ix_to_word)
         print('vocab size is ', self.vocab_size)
-        
+     
         # open the hdf5 file
         print('DataLoader loading h5 file: ', opt.input_fc_dir, opt.input_att_dir, opt.input_box_dir, opt.input_label_h5)
         self.h5_label_file = h5py.File(self.opt.input_label_h5, 'r', driver='core')
@@ -193,9 +229,6 @@ class DataLoader(data.Dataset):
             info_dict['file_path'] = self.info['images'][ix]['file_path']
             infos.append(info_dict)
 
-        # #sort by att_feat length
-        # fc_batch, att_batch, label_batch, gts, infos = \
-        #     zip(*sorted(zip(fc_batch, att_batch, np.vsplit(label_batch, batch_size), gts, infos), key=lambda x: len(x[1]), reverse=True))
         fc_batch, att_batch, label_batch, gts, infos = \
             zip(*sorted(zip(fc_batch, att_batch, np.vsplit(label_batch, batch_size), gts, infos), key=lambda x: 0, reverse=True))
         data = {}
@@ -213,12 +246,6 @@ class DataLoader(data.Dataset):
             data['att_masks'] = None
 
         data['labels'] = np.vstack(label_batch)
-        # generate mask
-        # nonzeros = np.array(list(map(lambda x: (x != 0).sum()+2, data['labels'])))
-        # for ix, row in enumerate(mask_batch):
-        #     row[:nonzeros[ix]] = 1
-        # data['masks'] = mask_batch
-
         data['gts'] = gts # all ground truth captions of each images
         data['bounds'] = {'it_pos_now': self.iterators[split], 'it_max': len(self.split_ix[split]), 'wrapped': wrapped}
         data['infos'] = infos
@@ -239,9 +266,24 @@ class DataLoader(data.Dataset):
         new_labels_tensor = torch.from_numpy(new_labels).long()         
         embeddings = self.bert_model(new_labels_tensor)[0]
         bert_feats = embeddings.data.cpu().numpy().astype(np.float32)
-        
-        data['labels'] = new_labels
+        data['labels'] = new_labels        
         data['bert_feats'] = bert_feats
+
+        # Extract Sentence BERT embeddings    
+        sent_bert_feats = bert_feats
+        for ind, sample in enumerate(data['infos']):
+            # find [SEP] index across the paragraph
+            sent_ind = [0]+[j for j, label in enumerate(new_labels[ind,:]) if label==self.sep_bert_index][:-1]
+
+            # get sub sentence bert tokens 
+            sample_bert_tokens = self.sent_bert_tokens[sample['id']]
+            sub_tensor = torch.from_numpy(sample_bert_tokens).long()
+            sub_embeddings = self.bert_model(sub_tensor)[0]
+            sub_bert_feats = sub_embeddings.data.cpu().numpy().astype(np.float32)
+            for i in range(sample_bert_tokens.shape[0]):
+                sent_bert_feats[ind,sent_ind[i]+1:sent_ind[i+1],:] = sub_bert_feats[i, 0, :]
+        data['sent_bert_feats'] = sent_bert_feats
+
 
         # generate masks
         mask_batch = np.zeros((data['labels'].shape[0], data['labels'].shape[1]), dtype = 'float32')

@@ -15,5 +15,6 @@ python -W ignore train.py \
     --save_checkpoint_every 500 \
     --checkpoint_path 'bert_test/' \
     --id 'bert' \
+    --gpu 0,1 \
     --print_freq 20 \
     --beam_size 1
