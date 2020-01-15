@@ -10,55 +10,124 @@ import time
 import os
 import sys
 import misc.utils as utils
+from pprint import pprint
+# from pycocoevalcap.eval import COCOEvalCap
+
+from pycocoevalcap.bleu.bleu import Bleu
+from pycocoevalcap.meteor.meteor import Meteor
+from pycocoevalcap.rouge.rouge import Rouge
+from pycocoevalcap.cider.cider import Cider
 
 import ipdb
 
-def language_eval(dataset, preds, model_id, split):
-    import sys
-    sys.path.append("coco-caption")
-    annFile = 'coco-caption/annotations/para_captions_val.json'
-    from pycocotools.coco import COCO
-    from pycocoevalcap.eval import COCOEvalCap
+def eval_multi_metrics(ground_turth, predictions):
+    # scorers = [
+    #     (Bleu(4), "Bleu_4"),
+    #     (Meteor(),"METEOR"),
+    #     (Rouge(), "ROUGE_L"),
+    #     (Cider(), "CIDEr")
+    # ]
 
-    # encoder.FLOAT_REPR = lambda o: format(o, '.3f')
+    scorers = [
+        (Bleu(4), "Bleu_4"),
+        (Rouge(), "ROUGE_L"),
+        (Cider(), "CIDEr")
+    ]
 
-    if not os.path.isdir('eval_results'):
-        os.mkdir('eval_results')
-    cache_path = os.path.join('eval_results/', model_id + '_' + split + '.json')
+    gts = {}
+    res = {}
+    if len(predictions) == len(ground_turth):
+        for ind, value in enumerate(predictions):
+            res[ind] = [value]
 
-    coco = COCO(annFile)
-    valids = coco.getImgIds()
+        for ind, value in enumerate(ground_turth):
+            gts[ind] = [value]
+    else:
+        Min_Len = min(len(predictions), len(ground_turth))
+        for ind in range(Min_Len):
+            res[ind] = [predictions[ind]]
+            gts[ind] = [ground_turth[ind]]
 
-    # filter results to only those in MSCOCO validation set (will be about a third)
-    preds_filt = [p for p in preds if p['image_id'] in valids]
-    print('using %d/%d predictions' % (len(preds_filt), len(preds)))
-    json.dump(preds_filt, open(cache_path, 'w')) # serialize to temporary json file. Sigh, COCO API...
+    # param gts: Dictionary of reference sentences (id, sentence)
+    # param res: Dictionary of hypothesis sentences (id, sentence)
 
-    cocoRes = coco.loadRes(cache_path)
-    cocoEval = COCOEvalCap(coco, cocoRes)
-    cocoEval.params['image_id'] = cocoRes.getImgIds()
-    cocoEval.evaluate()
+    print('samples: {} / {}'.format(len(res.keys()), len(gts.keys())))
 
-    # create output dictionary
-    out = {}
-    for metric, score in cocoEval.eval.items():
-        out[metric] = score
+    scores = {}
+    for scorer, name in scorers:
+        score, all_scores = scorer.compute_score(gts, res)
+        if isinstance(score, list):
+            for i, sc in enumerate(score, 1):
+                scores[name + str(i)] = sc
+        else:
+            scores[name] = score
+    pprint(scores)
+    return scores
 
-    imgToEval = cocoEval.imgToEval
-    for p in preds_filt:
-        image_id, caption = p['image_id'], p['caption']
-        imgToEval[image_id]['caption'] = caption
-    with open(cache_path, 'w') as outfile:
-        json.dump({'overall': out, 'imgToEval': imgToEval}, outfile)
+def language_eval(bert_tokens, preds, model_id, split):
+    # get all IDs in the preds
+    val_ids = []
+    predictions = []
+    ground_turth = []
+    for sample in preds:
+        val_ids.append(sample['image_id'])
+        predictions.append(sample['caption'])
+    
+    print('using %d/%d predictions' % (len(predictions), len(predictions)))
+    # get ground-truth data
+    for ID in val_ids:
+        ground_turth.append(bert_tokens[ID]['raw'])
 
-    return out
+    lang_stat = eval_multi_metrics(ground_turth, predictions)
+    return lang_stat
+
+# def language_eval(bert_tokens, preds, model_id, split):
+#     import sys
+#     sys.path.append("coco-caption")
+#     annFile = 'coco-caption/annotations/para_captions_val.json'
+#     from pycocotools.coco import COCO
+#     from pycocoevalcap.eval import COCOEvalCap
+
+#     # encoder.FLOAT_REPR = lambda o: format(o, '.3f')
+
+#     if not os.path.isdir('eval_results'):
+#         os.mkdir('eval_results')
+#     cache_path = os.path.join('eval_results/', model_id + '_' + split + '.json')
+
+#     coco = COCO(annFile)
+#     valids = coco.getImgIds()
+
+#     # filter results to only those in MSCOCO validation set (will be about a third)
+#     preds_filt = [p for p in preds if p['image_id'] in valids]
+#     print('using %d/%d predictions' % (len(preds_filt), len(preds)))
+#     json.dump(preds_filt, open(cache_path, 'w')) # serialize to temporary json file. Sigh, COCO API...
+
+#     cocoRes = coco.loadRes(cache_path)
+#     cocoEval = COCOEvalCap(coco, cocoRes)
+#     cocoEval.params['image_id'] = cocoRes.getImgIds()
+#     cocoEval.evaluate()
+
+#     # create output dictionary
+#     out = {}
+#     for metric, score in cocoEval.eval.items():
+#         out[metric] = score
+
+#     imgToEval = cocoEval.imgToEval
+#     for p in preds_filt:
+#         image_id, caption = p['image_id'], p['caption']
+#         imgToEval[image_id]['caption'] = caption
+#     with open(cache_path, 'w') as outfile:
+#         json.dump({'overall': out, 'imgToEval': imgToEval}, outfile)
+
+#     return out
 
 def eval_split(model, crit, loader, eval_kwargs={}):
     verbose = eval_kwargs.get('verbose', True)
     verbose_beam = eval_kwargs.get('verbose_beam', 1)
     verbose_loss = eval_kwargs.get('verbose_loss', 1)
     num_images = eval_kwargs.get('num_images', eval_kwargs.get('val_images_use', -1))
-    split = eval_kwargs.get('split', 'val')
+    # split = eval_kwargs.get('split', 'val')
+    split = eval_kwargs.get('split', 'test')
     lang_eval = eval_kwargs.get('language_eval', 0)
     dataset = eval_kwargs.get('dataset', 'coco')
     beam_size = eval_kwargs.get('beam_size', 1)
@@ -118,10 +187,6 @@ def eval_split(model, crit, loader, eval_kwargs={}):
                 print(cmd)
                 os.system(cmd)
 
-            # Only print the first 3 samples
-            #if verbose:
-            #    print('\timage %s: %s' %(entry['image_id'], entry['caption']))
-
         # if we wrapped around the split or used up val imgs budget then bail
         ix0 = data['bounds']['it_pos_now']
         ix1 = data['bounds']['it_max']
@@ -141,7 +206,11 @@ def eval_split(model, crit, loader, eval_kwargs={}):
     # Evaluate BLEU, MENTOR, etc.
     lang_stats = None
     if lang_eval == 1:
-        lang_stats = language_eval(dataset, predictions, eval_kwargs['id'], split)
+        import ipdb; ipdb.set_trace()
+        # dataset: 'data/paratalk/paratalk.json'
+        # each element of predictions: {'image_id': XXX, 'caption': XXX}
+        # split: 'val'; eval_kwargs['id']: 'bert2'
+        lang_stats = language_eval(loader.bert_tokens, predictions, eval_kwargs['id'], split)
 
     # Print a few sample outputs
     Top_K = 5
