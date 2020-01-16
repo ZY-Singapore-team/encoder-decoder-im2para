@@ -13,7 +13,8 @@ python -W ignore train.py \
     --input_encoding_size 768 \
     --val_images_use 5000 \
     --save_checkpoint_every 500 \
-    --checkpoint_path 'bert_test/' \
-    --id 'bert' \
+    --checkpoint_path 'bert_test2/' \
+    --id 'bert2' \
     --print_freq 20 \
     --beam_size 1
+    # --start_from 'bert_test2/'

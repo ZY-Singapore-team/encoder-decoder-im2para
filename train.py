@@ -47,14 +47,14 @@ def train(opt):
     infos = {}
     histories = {}
     if opt.start_from is not None:
-        with open(os.path.join(opt.start_from, 'infos_'+opt.id+'.pkl')) as f:
+        with open(os.path.join(opt.start_from, 'infos_'+opt.id+'.pkl'), 'rb') as f:
             infos = pickle.load(f)
             saved_model_opt = infos['opt']
             need_be_same=["rnn_type", "rnn_size", "num_layers"]
             for checkme in need_be_same:
                 assert vars(saved_model_opt)[checkme] == vars(opt)[checkme], "Command line argument and saved model disagree on '%s' " % checkme
         if os.path.isfile(os.path.join(opt.start_from, 'histories_'+opt.id+'.pkl')):
-            with open(os.path.join(opt.start_from, 'histories_'+opt.id+'.pkl')) as f:
+            with open(os.path.join(opt.start_from, 'histories_'+opt.id+'.pkl'), 'rb') as f:
                 histories = pickle.load(f)
     iteration = infos.get('iter', 0)
     epoch = infos.get('epoch', 0)

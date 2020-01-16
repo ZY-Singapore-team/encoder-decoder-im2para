@@ -13,10 +13,6 @@
 # https://arxiv.org/abs/1707.07998
 # However, it may not be identical to the author's architecture.
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,8 +20,8 @@ import misc.utils as utils
 from torch.nn.utils.rnn import PackedSequence, pack_padded_sequence, pad_packed_sequence
 
 from .CaptionModel import CaptionModel
-
-import pdb
+from transformers import BertModel
+import numpy as np
 
 import ipdb
 
@@ -89,6 +85,9 @@ class AttModel(CaptionModel):
             self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 1)]
             self.logit = nn.Sequential(*(reduce(lambda x,y:x+y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
         self.ctx2att = nn.Linear(self.rnn_size, self.att_hid_size)
+
+        # BERT model
+        self.bert_model = BertModel.from_pretrained("bert-base-cased")
 
     def init_BERT_embeddings(self, embedding_weights):
         self.embed.weight.data.copy_(torch.from_numpy(embedding_weights))
@@ -169,6 +168,40 @@ class AttModel(CaptionModel):
 
         return logprobs, state
 
+    def extract_bert_feats(self):
+        bert_feats = np.zeros((data['labels'].shape[0], data['labels'].shape[1], self.opt.input_encoding_size), dtype='float32')
+        new_labels = np.zeros((data['labels'].shape[0], data['labels'].shape[1]), dtype = 'int')
+
+        for ind, sample in enumerate(data['infos']):
+            if len(self.bert_tokens[sample['id']]['tokens']) == 0:
+                continue
+            else:
+                new_labels[ind, 1:-1] = self.bert_tokens[sample['id']]['tokens'].astype(np.int)
+        
+        # Extract BERT embeddings
+        new_labels_tensor = torch.from_numpy(new_labels).long()         
+        embeddings = self.bert_model(new_labels_tensor)[0]
+        bert_feats = embeddings.data.cpu().numpy().astype(np.float32)
+        
+        data['labels'] = new_labels
+        data['bert_feats'] = bert_feats
+
+        # generate masks
+        mask_batch = np.zeros((data['labels'].shape[0], data['labels'].shape[1]), dtype = 'float32')
+        nonzeros = np.array(list(map(lambda x: (x != 0).sum()+2, data['labels'])))
+        for ix, row in enumerate(mask_batch):
+            row[:nonzeros[ix]] = 1
+        data['masks'] = mask_batch
+
+        return data
+
+
+    # This is for inference, should apply none teacher-forcing. 
+    def inference_logprobs_state(self, it, previous_seq, fc_feats, att_feats, p_att_feats, att_masks, state):
+        # previous_seq: [batch_size, pre_len]
+        pass
+
+
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
         beam_size = opt.get('beam_size', 10)
         batch_size = fc_feats.size(0)
@@ -197,10 +230,11 @@ class AttModel(CaptionModel):
         # return the samples and their log likelihoods
         return seq.transpose(0, 1), seqLogprobs.transpose(0, 1)
 
-    def _sample(self, bert_feats, fc_feats, att_feats, att_masks=None, opt={}):
+    def _sample(self, bert_info, fc_feats, att_feats, att_masks=None, opt={}):
 
-        # ipdb.set_trace()
-
+        # bert_tokens: (batch_size, max_seq_len)
+        bert_tokens = bert_info['tokens']
+        ix_to_BERT = bert_info['vocab']
         att_feats, att_masks = self.clip_att(att_feats, att_masks)
 
         sample_max = opt.get('sample_max', 1)
@@ -224,6 +258,16 @@ class AttModel(CaptionModel):
         # seqLogprobs = []
         seq = fc_feats.new_zeros((batch_size, self.seq_length), dtype=torch.long)
         seqLogprobs = fc_feats.new_zeros(batch_size, self.seq_length)
+
+        # the initial bert hidden state
+        current_bert_tokens = bert_tokens[:, 0:1]
+        # current_bert_tokens = torch.from_numpy(current_bert_tokens).long()     
+        current_bert_feats = self.bert_model(current_bert_tokens)[0]
+        # current_bert_feats = embeddings.data.cpu().numpy().astype(np.float32)
+        # full_bert_tokens = current_bert_tokens.copy()
+        full_bert_tokens = current_bert_tokens.clone().detach()
+        current_bert_feats = current_bert_feats.squeeze(1)
+
         for t in range(self.seq_length + 1):
             if t == 0: # input <bos>
                 it = fc_feats.new_zeros(batch_size, dtype=torch.long)
@@ -255,8 +299,19 @@ class AttModel(CaptionModel):
                 # seqLogprobs.append(sampleLogprobs.view(-1))
                 seqLogprobs[:,t-1] = sampleLogprobs.view(-1)
 
-            # ipdb.set_trace()
-            logprobs, state = self.get_logprobs_state(it, bert_feats[:, t, :], fc_feats, att_feats, p_att_feats, att_masks, state)
+            logprobs, state = self.get_logprobs_state(it, current_bert_feats, fc_feats, att_feats, p_att_feats, att_masks, state)
+            
+            # decode the current prediction word
+            # predicts: [batch_size, 1]
+            _, predicts = torch.max(torch.softmax(logprobs, 1), 1)
+            predicts = predicts.unsqueeze(1)
+            # should map predicts to BERT token ids
+            predicts_bert = np.array([ix_to_BERT[e] for e in predicts.flatten().cpu().numpy()]).reshape(predicts.shape)
+            predicts_bert = torch.from_numpy(predicts_bert).long().cuda()
+            # get current contexts
+            full_bert_tokens = torch.cat((full_bert_tokens, predicts_bert), 1)
+            # extract bert feats
+            current_bert_feats = self.bert_model(full_bert_tokens)[0][:, -1, :]
 
             if decoding_constraint and t > 0:
                 tmp = output.new_zeros(output.size(0), self.vocab_size + 1)

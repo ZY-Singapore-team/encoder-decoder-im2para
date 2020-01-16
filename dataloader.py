@@ -58,9 +58,12 @@ class DataLoader(data.Dataset):
 
         self.ix_to_word = ix_to_word
         self.vocab_size = vocab_size
+        self.BERT_to_idx = BERT_to_idx
+        self.ix_to_BERT = {v:k for (k,v) in self.BERT_to_idx.items()}
 
         # convert bert token ids into normal token ids
         for sent_id, content in bert_features.items():
+            bert_features[sent_id]['bert_tokens'] = content['tokens'].copy()
             for ind, token in enumerate(content['tokens']):
                 bert_features[sent_id]['tokens'][ind] = BERT_to_idx[token]
 
@@ -228,20 +231,24 @@ class DataLoader(data.Dataset):
         # new_labels: (batch, max_seq + 2)
         bert_feats = np.zeros((data['labels'].shape[0], data['labels'].shape[1], self.opt.input_encoding_size), dtype='float32')
         new_labels = np.zeros((data['labels'].shape[0], data['labels'].shape[1]), dtype = 'int')
+        bert_labels = np.zeros((data['labels'].shape[0], data['labels'].shape[1]), dtype = 'int')
 
         for ind, sample in enumerate(data['infos']):
             if len(self.bert_tokens[sample['id']]['tokens']) == 0:
                 continue
             else:
                 new_labels[ind, 1:-1] = self.bert_tokens[sample['id']]['tokens'].astype(np.int)
+                bert_labels[ind, 1:-1] = self.bert_tokens[sample['id']]['bert_tokens'].astype(np.int)
         
         # Extract BERT embeddings
-        new_labels_tensor = torch.from_numpy(new_labels).long()         
-        embeddings = self.bert_model(new_labels_tensor)[0]
+        new_labels_tensor = torch.from_numpy(new_labels).long()
+        bert_labels_tensor = torch.from_numpy(new_labels).long()      
+        embeddings = self.bert_model(bert_labels_tensor)[0]
         bert_feats = embeddings.data.cpu().numpy().astype(np.float32)
         
         data['labels'] = new_labels
         data['bert_feats'] = bert_feats
+        data['bert_labels'] = bert_labels
 
         # generate masks
         mask_batch = np.zeros((data['labels'].shape[0], data['labels'].shape[1]), dtype = 'float32')
