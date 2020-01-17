@@ -2,6 +2,7 @@ import json
 import h5py
 import os
 import numpy as np
+from collections import Counter
 import random
 
 import torch
@@ -58,42 +59,43 @@ class DataLoader(data.Dataset):
 
         self.ix_to_word = ix_to_word
         self.vocab_size = vocab_size
+        self.BERT_to_idx = BERT_to_idx
+        self.ix_to_BERT = {v:k for (k,v) in self.BERT_to_idx.items()}
 
         # convert bert token ids into normal token ids
         for sent_id, content in bert_features.items():
+            bert_features[sent_id]['bert_tokens'] = content['tokens'].copy()
             for ind, token in enumerate(content['tokens']):
-                bert_features[sent_id]['tokens'][ind] = BERT_to_idx[token]
+                bert_features[sent_id]['tokens'][ind] = BERT_to_idx[token]        
 
         # save bert features
         self.bert_tokens = bert_features
 
         # get the index of full stop of the dictionary
-        cls_index = 101
-        sep_index = 102
+        self.cls_index = 101
+        self.sep_index = 102
         max_sent_len = 50
-        self.cls_bert_index = BERT_to_idx[cls_index]
-        self.sep_bert_index = BERT_to_idx[sep_index]
-        print('[CLS] new bert index: ' + str(self.cls_bert_index))
-        print('[SEP] new bert index: ' + str(self.sep_bert_index))
+        self.cls_bert_index = BERT_to_idx[self.cls_index]
+        self.sep_bert_index = BERT_to_idx[self.sep_index]
 
         # rebuild sentence-wise bert content
         sent_bert_tokens = {}
         for sent_id, content in bert_features.items():
-            if content['tokens']==[]:
+            if content['bert_tokens']==[]:
                 continue
-            s_ind = [j for j, t in enumerate(content['tokens']) if t==self.sep_bert_index]
-            sent_content = np.split(content['tokens'], s_ind)[:-2]
+            s_ind = [j for j, t in enumerate(content['bert_tokens']) if t==self.sep_index]
+            sent_content = np.split(content['bert_tokens'], s_ind)[:-2]
             sent_content = [i[1:] for i in sent_content]
             new_sent_content = np.zeros((len(sent_content),max_sent_len+2))
             for i, sent in enumerate(sent_content):
-                new_sent_content[i,0] = self.cls_bert_index
+                new_sent_content[i,0] = self.cls_index
                 for ind, token in enumerate(sent):
                     if ind < max_sent_len:
                         new_sent_content[i,ind+1] = token
                     else:
                         ind = ind-1
                         break
-                new_sent_content[i,ind+2] = self.sep_bert_index
+                new_sent_content[i,ind+2] = self.sep_index
             sent_bert_tokens[sent_id] = new_sent_content.astype(np.int)
 
         self.sent_bert_tokens = sent_bert_tokens
@@ -255,35 +257,55 @@ class DataLoader(data.Dataset):
         # new_labels: (batch, max_seq + 2)
         bert_feats = np.zeros((data['labels'].shape[0], data['labels'].shape[1], self.opt.input_encoding_size), dtype='float32')
         new_labels = np.zeros((data['labels'].shape[0], data['labels'].shape[1]), dtype = 'int')
+        bert_labels = np.zeros((data['labels'].shape[0], data['labels'].shape[1]), dtype = 'int')
 
         for ind, sample in enumerate(data['infos']):
             if len(self.bert_tokens[sample['id']]['tokens']) == 0:
                 continue
             else:
                 new_labels[ind, 1:-1] = self.bert_tokens[sample['id']]['tokens'].astype(np.int)
-        
+                bert_labels[ind, 1:-1] = self.bert_tokens[sample['id']]['bert_tokens'].astype(np.int)
+
         # Extract BERT embeddings
-        new_labels_tensor = torch.from_numpy(new_labels).long()         
-        embeddings = self.bert_model(new_labels_tensor)[0]
+        new_labels_tensor = torch.from_numpy(new_labels).long()
+        bert_labels_tensor = torch.from_numpy(bert_labels).long()      
+        embeddings = self.bert_model(bert_labels_tensor)[0]
         bert_feats = embeddings.data.cpu().numpy().astype(np.float32)
-        data['labels'] = new_labels        
+        data['labels'] = new_labels    
+        data['bert_labels'] = bert_labels    
         data['bert_feats'] = bert_feats
 
-        # Extract Sentence BERT embeddings    
+        # Extract Sentence BERT embeddings 
+        sub_tokens = []
+        nb_dict = {}
+        for ind, sample in enumerate(data['infos']):
+            # get sub sentence bert tokens
+            if sample['id'] in self.sent_bert_tokens:
+                sample_bert_tokens = self.sent_bert_tokens[sample['id']]
+                sub_tokens.append(sample_bert_tokens)
+                nb_dict[sample['id']] = sample_bert_tokens.shape[0]
+            else:
+                continue
+        nb_tokens = np.concatenate(sub_tokens,axis=0)
+        nb_tensor = torch.from_numpy(nb_tokens).long()
+        nb_embeddings = self.bert_model(nb_tensor)[0]
+        nb_bert_feats= nb_embeddings.data.cpu().numpy().astype(np.float32)
+
+        # Extract Sentence BERT embeddings  
         sent_bert_feats = bert_feats
+        x = 0
         for ind, sample in enumerate(data['infos']):
             # find [SEP] index across the paragraph
-            sent_ind = [0]+[j for j, label in enumerate(new_labels[ind,:]) if label==self.sep_bert_index][:-1]
-
-            # get sub sentence bert tokens 
-            sample_bert_tokens = self.sent_bert_tokens[sample['id']]
-            sub_tensor = torch.from_numpy(sample_bert_tokens).long()
-            sub_embeddings = self.bert_model(sub_tensor)[0]
-            sub_bert_feats = sub_embeddings.data.cpu().numpy().astype(np.float32)
-            for i in range(sample_bert_tokens.shape[0]):
-                sent_bert_feats[ind,sent_ind[i]+1:sent_ind[i+1],:] = sub_bert_feats[i, 0, :]
+            sent_ind = [0]+[j for j, label in enumerate(bert_labels[ind,:]) if label==self.sep_index][:-1]
+            # get sub sentence bert tokens
+            if sample['id'] in self.sent_bert_tokens:        
+                sub_bert_feats = nb_bert_feats[x:x+nb_dict[sample['id']],:]
+                for i in range(sub_bert_feats.shape[0]):
+                    sent_bert_feats[ind,sent_ind[i]+1:sent_ind[i+1],:] = sub_bert_feats[i, 0, :]
+                x+=nb_dict[sample['id']]
+            else:
+                continue
         data['sent_bert_feats'] = sent_bert_feats
-
 
         # generate masks
         mask_batch = np.zeros((data['labels'].shape[0], data['labels'].shape[1]), dtype = 'float32')

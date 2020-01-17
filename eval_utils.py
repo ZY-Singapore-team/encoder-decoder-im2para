@@ -18,7 +18,6 @@ from pycocoevalcap.meteor.meteor import Meteor
 from pycocoevalcap.rouge.rouge import Rouge
 from pycocoevalcap.cider.cider import Cider
 
-import ipdb
 
 def eval_multi_metrics(ground_turth, predictions):
     # scorers = [
@@ -81,46 +80,6 @@ def language_eval(bert_tokens, preds, model_id, split):
     lang_stat = eval_multi_metrics(ground_turth, predictions)
     return lang_stat
 
-# def language_eval(bert_tokens, preds, model_id, split):
-#     import sys
-#     sys.path.append("coco-caption")
-#     annFile = 'coco-caption/annotations/para_captions_val.json'
-#     from pycocotools.coco import COCO
-#     from pycocoevalcap.eval import COCOEvalCap
-
-#     # encoder.FLOAT_REPR = lambda o: format(o, '.3f')
-
-#     if not os.path.isdir('eval_results'):
-#         os.mkdir('eval_results')
-#     cache_path = os.path.join('eval_results/', model_id + '_' + split + '.json')
-
-#     coco = COCO(annFile)
-#     valids = coco.getImgIds()
-
-#     # filter results to only those in MSCOCO validation set (will be about a third)
-#     preds_filt = [p for p in preds if p['image_id'] in valids]
-#     print('using %d/%d predictions' % (len(preds_filt), len(preds)))
-#     json.dump(preds_filt, open(cache_path, 'w')) # serialize to temporary json file. Sigh, COCO API...
-
-#     cocoRes = coco.loadRes(cache_path)
-#     cocoEval = COCOEvalCap(coco, cocoRes)
-#     cocoEval.params['image_id'] = cocoRes.getImgIds()
-#     cocoEval.evaluate()
-
-#     # create output dictionary
-#     out = {}
-#     for metric, score in cocoEval.eval.items():
-#         out[metric] = score
-
-#     imgToEval = cocoEval.imgToEval
-#     for p in preds_filt:
-#         image_id, caption = p['image_id'], p['caption']
-#         imgToEval[image_id]['caption'] = caption
-#     with open(cache_path, 'w') as outfile:
-#         json.dump({'overall': out, 'imgToEval': imgToEval}, outfile)
-
-#     return out
-
 def eval_split(model, crit, loader, eval_kwargs={}):
     verbose = eval_kwargs.get('verbose', True)
     verbose_beam = eval_kwargs.get('verbose_beam', 1)
@@ -148,28 +107,31 @@ def eval_split(model, crit, loader, eval_kwargs={}):
 
         if data.get('labels', None) is not None and verbose_loss:
             # forward the model to get loss
-            tmp = [data['bert_feats'], data['sent_bert_feats'], data['fc_feats'], data['att_feats'], data['labels'], data['masks'], data['att_masks']]
+            tmp = [data['bert_labels'], data['bert_feats'], data['sent_bert_feats'], data['fc_feats'], data['att_feats'], data['labels'], data['masks'], data['att_masks']]
             tmp = [torch.from_numpy(_).cuda() if _ is not None else _ for _ in tmp]
-            bert_feats, sent_bert_feats, fc_feats, att_feats, labels, masks, att_masks = tmp
+            bert_labels, bert_feats, sent_bert_feats, fc_feats, att_feats, labels, masks, att_masks = tmp
 
             with torch.no_grad():
-                loss = crit(model(bert_feats, sent_bert_feats, fc_feats, att_feats, labels, att_masks), labels[:,1:], masks[:,1:]).item()
+                loss = crit(model(bert_feats, fc_feats, sent_bert_feats, att_feats, labels, att_masks), labels[:,1:], masks[:,1:]).item()
             loss_sum = loss_sum + loss
             loss_evals = loss_evals + 1
 
         # forward the model to also get generated samples for each image
         # Only leave one feature for each image, in case duplicate sample
-        tmp = [data['bert_feats'][np.arange(loader.batch_size) * loader.seq_per_img],
+        tmp = [data['bert_labels'][np.arange(loader.batch_size) * loader.seq_per_img],
+            data['bert_feats'][np.arange(loader.batch_size) * loader.seq_per_img],
             data['sent_bert_feats'][np.arange(loader.batch_size) * loader.seq_per_img],
             data['fc_feats'][np.arange(loader.batch_size) * loader.seq_per_img], 
             data['att_feats'][np.arange(loader.batch_size) * loader.seq_per_img],
             data['att_masks'][np.arange(loader.batch_size) * loader.seq_per_img] if data['att_masks'] is not None else None]
         tmp = [torch.from_numpy(_).cuda() if _ is not None else _ for _ in tmp]
-        bert_feats, sent_bert_feats, fc_feats, att_feats, att_masks = tmp
+        bert_labels, bert_feats, sent_bert_feats, fc_feats, att_feats, att_masks = tmp
         # forward the model to also get generated samples for each image
+        # seq: [batch_size, max_seq_len]
+        bert_info = {'vocab': loader.ix_to_BERT, 'tokens': bert_labels}
         with torch.no_grad():
-            seq = model(bert_feats, sent_bert_feats, fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')[0].data
-        
+            seq = model(bert_info, fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')[0].data
+
         # Print beam search
         if beam_size > 1 and verbose_beam:
             for i in range(loader.batch_size):
@@ -207,7 +169,6 @@ def eval_split(model, crit, loader, eval_kwargs={}):
     # Evaluate BLEU, MENTOR, etc.
     lang_stats = None
     if lang_eval == 1:
-        import ipdb; ipdb.set_trace()
         # dataset: 'data/paratalk/paratalk.json'
         # each element of predictions: {'image_id': XXX, 'caption': XXX}
         # split: 'val'; eval_kwargs['id']: 'bert2'

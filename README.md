@@ -1,4 +1,4 @@
-# Building Sentence-to-Word Encoder-Decoder for Image Paragraph Captioning
+# Visual-Sentence Alignments for Image Paragraph Captioning
 
 This repository includes a PyTorch implementation of [Building Sentence-to-Word Encoder-Decoder for Image Paragraph Captioning](). 
 

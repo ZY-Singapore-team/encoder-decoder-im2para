@@ -47,14 +47,14 @@ def train(opt):
     infos = {}
     histories = {}
     if opt.start_from is not None:
-        with open(os.path.join(opt.start_from, 'infos_'+opt.id+'.pkl')) as f:
+        with open(os.path.join(opt.start_from, 'infos_'+opt.id+'.pkl'), 'rb') as f:
             infos = pickle.load(f)
             saved_model_opt = infos['opt']
             need_be_same=["rnn_type", "rnn_size", "num_layers"]
             for checkme in need_be_same:
                 assert vars(saved_model_opt)[checkme] == vars(opt)[checkme], "Command line argument and saved model disagree on '%s' " % checkme
         if os.path.isfile(os.path.join(opt.start_from, 'histories_'+opt.id+'.pkl')):
-            with open(os.path.join(opt.start_from, 'histories_'+opt.id+'.pkl')) as f:
+            with open(os.path.join(opt.start_from, 'histories_'+opt.id+'.pkl'), 'rb') as f:
                 histories = pickle.load(f)
     iteration = infos.get('iter', 0)
     epoch = infos.get('epoch', 0)
@@ -192,7 +192,7 @@ def train(opt):
             if best_flag:
                 model_fname = 'model-best-i{:05d}-score{:.4f}.pth'.format(iteration, best_val_score)
                 infos_fname = 'model-best-i{:05d}-infos.pkl'.format(iteration)
-                checkpoint_path = os.path.join(opt.checkpoint_path, opt.caption_model, opt.model_fname)
+                checkpoint_path = os.path.join(opt.checkpoint_path, opt.caption_model, model_fname)
                 torch.save(model.state_dict(), checkpoint_path)
                 print("model saved to {}".format(checkpoint_path)) 
                 with open(os.path.join(opt.checkpoint_path, opt.caption_model, infos_fname), 'wb') as f:

@@ -57,8 +57,8 @@ def parse_opt():
                     help='repetition-blocking hyperparameter, default 0.0')
     parser.add_argument('--rnn_size', type=int, default=512,
                     help='size of the rnn in number of hidden nodes in each layer')
-    parser.add_argument('--num_layers', type=int, default=1,
-                    help='number of layers in the RNN')
+    parser.add_argument('--num_layers', type=int, default=3,
+                    help='number of layers in the RNN. double attention if 4, single attention if 3')
     parser.add_argument('--rnn_type', type=str, default='lstm',
                     help='rnn, gru, or lstm')
     parser.add_argument('--input_encoding_size', type=int, default=512,

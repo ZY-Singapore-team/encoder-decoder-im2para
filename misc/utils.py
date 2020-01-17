@@ -4,7 +4,7 @@ import torch.nn as nn
 import numpy as np
 import torch.optim as optim
 
-import ipdb
+# import ipdb
 
 def if_use_att(caption_model):
     # Decide if load attention feature according to caption model

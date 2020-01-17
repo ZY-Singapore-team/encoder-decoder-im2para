@@ -12,11 +12,6 @@
 # TopDown is from Bottom-Up and Top-Down Attention for Image Captioning and VQA
 # https://arxiv.org/abs/1707.07998
 # However, it may not be identical to the author's architecture.
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,7 +20,7 @@ import copy
 import math
 import numpy as np
 from torch.nn.utils.rnn import PackedSequence, pack_padded_sequence, pad_packed_sequence
-
+from transformers import BertModel
 from .CaptionModel import CaptionModel
 
 
@@ -53,7 +48,6 @@ class HierModel(CaptionModel):
         super(HierModel, self).__init__()
         self.vocab_size = opt.vocab_size
         self.input_encoding_size = opt.input_encoding_size
-        #self.rnn_type = opt.rnn_type
         self.rnn_size = opt.rnn_size
         self.num_layers = opt.num_layers
         self.drop_prob_lm = opt.drop_prob_lm
@@ -74,6 +68,12 @@ class HierModel(CaptionModel):
             self.fc_embed = nn.Sequential(nn.Linear(self.fc_feat_size, self.rnn_size),
                                         nn.ReLU(inplace=True),
                                         nn.Dropout(self.drop_prob_lm))
+            self.bert_embed = nn.Sequential(*(
+                                        ((nn.BatchNorm1d(self.input_encoding_size),) if self.use_bn else ())+
+                                        (nn.Linear(self.input_encoding_size, self.rnn_size),
+                                        nn.ReLU(inplace=True),
+                                        nn.Dropout(self.drop_prob_lm))+
+                                        ((nn.BatchNorm1d(self.rnn_size),) if self.use_bn==2 else ())))           
             self.att_embed = nn.Sequential(*(
                                         ((nn.BatchNorm1d(self.att_feat_size),) if self.use_bn else ())+
                                         (nn.Linear(self.att_feat_size, self.rnn_size),
@@ -96,6 +96,8 @@ class HierModel(CaptionModel):
         if self.logit_layers == 1:
             self.logit = nn.Linear(self.rnn_size, self.vocab_size + 1)
         self.ctx2att = nn.Linear(self.rnn_size, self.att_hid_size)
+        # BERT model
+        self.bert_model = BertModel.from_pretrained("bert-base-cased")
 
     def init_BERT_embeddings(self, embedding_weights):
         self.embed.weight.data.copy_(torch.from_numpy(embedding_weights))
@@ -118,6 +120,7 @@ class HierModel(CaptionModel):
 
         # embed fc and att feats
         fc_feats = self.fc_embed(fc_feats)
+
         if self.rela_index:
             att_feats = self.rela_mod(att_feats, att_masks)
         att_feats = pack_wrapper(self.att_embed, att_feats, att_masks)
@@ -132,13 +135,13 @@ class HierModel(CaptionModel):
 
         batch_size = fc_feats.size(0)
         state = self.init_hidden(batch_size)
-        old_state = fc_feats.new_zeros(batch_size, self.rnn_size)
-        old_att = fc_feats.new_zeros(batch_size, self.rnn_size)
 
         # outputs = []
         outputs = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size+1)
 
         fc_feats, att_feats, p_att_feats = self._prepare_feature(fc_feats, att_feats, att_masks)
+        bert_feats = self.bert_embed(bert_feats)
+        sen_bert_feats = self.bert_embed(sen_bert_feats)
 
         for i in range(seq.size(1) - 1):
             if self.training and i >= 1 and self.ss_prob > 0.0: # otherwiste no need to sample
@@ -157,14 +160,14 @@ class HierModel(CaptionModel):
             if i >= 1 and seq[:, i].sum() == 0:
                 break
 
-            output, state, old_state, old_att = self.get_logprobs_state(it, bert_feats[:,i,:], sen_bert_feats[:,i,:], fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att)
+            output, state = self.get_logprobs_state(it, bert_feats[:,i,:], sen_bert_feats[:,i,:], fc_feats, att_feats, p_att_feats, att_masks, state)
             outputs[:, i] = output
             # outputs.append(output)
 
         return outputs
         # return torch.cat([_.unsqueeze(1) for _ in outputs], 1)
 
-    def get_logprobs_state(self, it, bert_feats, sen_bert_feats, fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att):
+    def get_logprobs_state(self, it, bert_feats, sen_bert_feats, fc_feats, att_feats, p_att_feats, att_masks, state):
         # 'it' contains a word index
         # xt = self.embed(it)
 
@@ -175,10 +178,15 @@ class HierModel(CaptionModel):
         xt.requires_grad = False            
         cs_index = it==int(self.fs_index)
 
-        output, state, old_state, old_att = self.core(st, xt, cs_index, fc_feats, att_feats, p_att_feats, state, old_state, old_att, att_masks)
+        output, state = self.core(st, xt, cs_index, fc_feats, att_feats, p_att_feats, state, att_masks)
         logprobs = F.log_softmax(self.logit(output), dim=1)
 
-        return logprobs, state, old_state, old_att
+        return logprobs, state
+
+    # This is for inference, should apply none teacher-forcing. 
+    def inference_logprobs_state(self, it, previous_seq, fc_feats, att_feats, p_att_feats, att_masks, state):
+        # previous_seq: [batch_size, pre_len]
+        pass
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
         beam_size = opt.get('beam_size', 10)
@@ -208,7 +216,11 @@ class HierModel(CaptionModel):
         # return the samples and their log likelihoods
         return seq.transpose(0, 1), seqLogprobs.transpose(0, 1)
 
-    def _sample(self, bert_feats, sen_bert_feats, fc_feats, att_feats, att_masks=None, opt={}):
+    def _sample(self, bert_info, fc_feats, att_feats, att_masks=None, opt={}):
+
+        # bert_tokens: (batch_size, max_seq_len)
+        bert_tokens = bert_info['tokens']
+        ix_to_BERT = bert_info['vocab']
         att_feats, att_masks = self.clip_att(att_feats, att_masks)
 
         sample_max = opt.get('sample_max', 1)
@@ -221,8 +233,7 @@ class HierModel(CaptionModel):
 
         batch_size = fc_feats.size(0)
         state = self.init_hidden(batch_size)
-        old_state = fc_feats.new_zeros(batch_size, self.rnn_size)
-        old_att = fc_feats.new_zeros(batch_size, self.rnn_size)
+
         fc_feats, att_feats, p_att_feats = self._prepare_feature(fc_feats, att_feats, att_masks)
 
         # BEG MODIFIED
@@ -233,6 +244,16 @@ class HierModel(CaptionModel):
         # seqLogprobs = []
         seq = fc_feats.new_zeros((batch_size, self.seq_length), dtype=torch.long)
         seqLogprobs = fc_feats.new_zeros(batch_size, self.seq_length)
+
+        # the initial bert hidden state
+        current_bert_tokens = bert_tokens[:, 0:1]
+        # current_bert_tokens = torch.from_numpy(current_bert_tokens).long()     
+        current_bert_feats = self.bert_model(current_bert_tokens)[0]
+        # current_bert_feats = embeddings.data.cpu().numpy().astype(np.float32)
+        # full_bert_tokens = current_bert_tokens.copy()
+        full_bert_tokens = current_bert_tokens.clone().detach()
+        current_bert_feats = current_bert_feats.squeeze(1)
+
         for t in range(self.seq_length + 1):
             if t == 0: # input <bos>
                 it = fc_feats.new_zeros(batch_size, dtype=torch.long)
@@ -264,7 +285,19 @@ class HierModel(CaptionModel):
                 # seqLogprobs.append(sampleLogprobs.view(-1))
                 seqLogprobs[:,t-1] = sampleLogprobs.view(-1)
 
-            logprobs, state, old_state, old_att = self.get_logprobs_state(it, bert_feats[:,t,:], sen_bert_feats[:,t,:], fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att)
+            logprobs, state = self.get_logprobs_state(it, current_bert_feats, current_bert_feats, fc_feats, att_feats, p_att_feats, att_masks, state)
+            
+            # decode the current prediction word
+            # predicts: [batch_size, 1]
+            _, predicts = torch.max(torch.softmax(logprobs, 1), 1)
+            predicts = predicts.unsqueeze(1)
+            # should map predicts to BERT token ids
+            predicts_bert = np.array([ix_to_BERT[e] for e in predicts.flatten().cpu().numpy()]).reshape(predicts.shape)
+            predicts_bert = torch.from_numpy(predicts_bert).long().cuda()
+            # get current contexts
+            full_bert_tokens = torch.cat((full_bert_tokens, predicts_bert), 1)
+            # extract bert feats
+            current_bert_feats = self.bert_model(full_bert_tokens)[0][:, -1, :]
 
             if decoding_constraint and t > 0:
                 tmp = output.new_zeros(output.size(0), self.vocab_size + 1)
@@ -300,51 +333,63 @@ class HierModel(CaptionModel):
                 #logprobs = logprobs - (mask * 1e9)
                 alpha = 2.0 # = 4
                 logprobs = logprobs + (mask * -0.693 * alpha) # ln(1/2) * alpha (alpha -> infty works best)
-
+                
             # END MODIFIED ----------------------------------------------------
 
         return seq, seqLogprobs
-        # return torch.cat([_.unsqueeze(1) for _ in seq], 1), torch.cat([_.unsqueeze(1) for _ in seqLogprobs], 1)
 
 
 class HTopDownCore(nn.Module):
     def __init__(self, opt, use_maxout=False):
         super(HTopDownCore, self).__init__()
+        self.num_layers = opt.num_layers
         self.drop_prob_lm = opt.drop_prob_lm
 
-        self.sen_att_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size * 2, opt.rnn_size) 
-        self.sen_lstm = nn.LSTMCell(opt.rnn_size * 2, opt.rnn_size) # h^1_s, \hat v
-        self.word_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size * 2, opt.rnn_size)
+        self.satt_lstm = nn.LSTMCell(opt.rnn_size * 3, opt.rnn_size) 
+        self.sent_lstm = nn.LSTMCell(opt.rnn_size * 2, opt.rnn_size)
+        self.watt_lstm = nn.LSTMCell(opt.rnn_size * 3, opt.rnn_size)
+        self.word_lstm = nn.LSTMCell(opt.rnn_size * 2, opt.rnn_size)
         self.attention = Attention(opt)
 
-    def forward(self, st, xt, cs_index, fc_feats, att_feats, p_att_feats, state, old_state, old_att = None, att_masks=None):
+    def forward(self, st, xt, cs_index, fc_feats, att_feats, p_att_feats, state, att_masks=None):
 
         ####################sentence level######################
         prev_h = state[0][1]
         att_lstm_input = torch.cat([prev_h, st, fc_feats], 1)
 
-        h_att, c_att = self.sen_att_lstm(att_lstm_input, (state[0][0], state[1][0]))
+        h_att, c_att = self.satt_lstm(att_lstm_input, (state[0][0], state[1][0]))
         att = self.attention(h_att, att_feats, p_att_feats, att_masks)
 
         sen_lstm_input = torch.cat([att, h_att], 1)
-        h_sen, c_sen = self.sen_lstm(sen_lstm_input, (state[0][1], state[1][1]))
+        h_sen, c_sen = self.sent_lstm(sen_lstm_input, (state[0][1], state[1][1]))
+
+        # get topic vectors when a sentence is ended at [SEP]
+        # batch_size = fc_feats.size(0)
+        # for batch_id in range(batch_size):
+        #     if cs_index[batch_id]==1:
+        #         old_state[batch_id] = h_sen[batch_id]
+        topic_vector = h_sen
 
         ####################word level##########################
-        batch_size = fc_feats.size(0)
-        for batch_id in range(batch_size):
-            if cs_index[batch_id]==1:
-                old_state[batch_id] = h_sen[batch_id]
-        topic_vector = old_state
-        # topic_vector = h_sen
-        prev_h_word = state[0][2]
+        if self.num_layers == 3:
+            prev_h_word = state[0][2]
+            word_lstm_input = torch.cat([xt, prev_h_word, topic_vector], 1)
+            h_word, c_word = self.watt_lstm(word_lstm_input, (state[0][2], state[1][2]))
+            output = F.dropout(h_word, self.drop_prob_lm, self.training)
+            state = (torch.stack([h_att, h_sen, h_word]), torch.stack([c_att, c_sen, c_word]))
 
-        word_lstm_input = torch.cat([xt, prev_h_word, topic_vector], 1)
-        h_word, c_word = self.word_lstm(word_lstm_input, (state[0][2], state[1][2]))
+        elif self.num_layers == 4:
+            prev_h_word = state[0][3]
+            watt_lstm_input = torch.cat([xt, prev_h_word, topic_vector], 1)
+            h_watt, c_watt = self.watt_lstm(watt_lstm_input, (state[0][2], state[1][2]))
+            watt = self.attention(h_watt, att_feats, p_att_feats, att_masks)
+            word_lstm_input = torch.cat([watt, h_watt], 1)
+            h_word, c_word = self.word_lstm(word_lstm_input, (state[0][3], state[1][3]))
 
-        output = F.dropout(h_word, self.drop_prob_lm, self.training)
-        state = (torch.stack([h_att, h_sen, h_word]), torch.stack([c_att, c_sen, c_word]))
+            output = F.dropout(h_word, self.drop_prob_lm, self.training)
+            state = (torch.stack([h_att, h_sen, h_watt, h_word]), torch.stack([c_att, c_sen, c_watt, c_word]))
 
-        return output, state, old_state, old_att
+        return output, state
 
 
 class Attention(nn.Module):
@@ -378,9 +423,8 @@ class Attention(nn.Module):
 
         return att_res
 
-
 class HTopDownModel(HierModel):
     def __init__(self, opt):
         super(HTopDownModel, self).__init__(opt)
-        self.num_layers = 3
+        self.num_layers = opt.num_layers
         self.core = HTopDownCore(opt)
