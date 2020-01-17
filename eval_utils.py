@@ -128,9 +128,9 @@ def eval_split(model, crit, loader, eval_kwargs={}):
         bert_labels, bert_feats, fc_feats, att_feats, att_masks = tmp
         # forward the model to also get generated samples for each image
         # seq: [batch_size, max_seq_len]
-        bert_info = {'vocab': loader.ix_to_BERT, 'tokens': bert_labels}
+        # bert_info = {'vocab': loader.ix_to_BERT, 'tokens': bert_labels}
         with torch.no_grad():
-            seq = model(bert_info, fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')[0].data
+            seq = model(bert_feats, fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')[0].data
         
         # import ipdb; ipdb.set_trace()
 

@@ -114,15 +114,18 @@ def train(opt):
 
         # Unpack data
         torch.cuda.synchronize()
-        tmp = [data['bert_feats'], data['fc_feats'], data['att_feats'], data['labels'], data['masks'], data['att_masks']]
+        tmp = [data['bert_labels'], data['bert_feats'], data['fc_feats'], data['att_feats'], data['labels'], data['masks'], data['att_masks']]
         tmp = [_ if _ is None else torch.from_numpy(_).cuda() for _ in tmp]
-        bert_feats, fc_feats, att_feats, labels, masks, att_masks = tmp
+        bert_labels, bert_feats, fc_feats, att_feats, labels, masks, att_masks = tmp
         bert_feats.requires_grad = False
+
+        # bert_info = {'vocab': loader.ix_to_BERT, 'tokens': bert_labels}
 
         # Forward pass and loss
         optimizer.zero_grad()
         outputs = dp_model(bert_feats, fc_feats, att_feats, labels, att_masks)
         loss = crit(outputs, labels[:,1:], masks[:,1:])
+        # ipdb.set_trace()
 
         # Backward pass
         loss.backward()

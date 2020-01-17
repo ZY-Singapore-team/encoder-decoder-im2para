@@ -12,6 +12,8 @@ from transformers import BertModel
 warnings.filterwarnings("ignore")
 
 import ipdb
+from tqdm import tqdm
+import pickle
 
 # import multiprocessing
 
@@ -66,6 +68,19 @@ class DataLoader(data.Dataset):
             bert_features[sent_id]['bert_tokens'] = content['tokens'].copy()
             for ind, token in enumerate(content['tokens']):
                 bert_features[sent_id]['tokens'][ind] = BERT_to_idx[token]
+
+        # extract static BERT features
+        # self.word_bert_feats = {}
+        # for ix, bert_id in tqdm(self.ix_to_BERT.items()):
+        #     word_corpus = torch.from_numpy(np.array([101, int(bert_id), 102])).unsqueeze(0)   
+        #     embeddings = self.bert_model(word_corpus)[0][:, 0, :].squeeze(0)
+        #     self.word_bert_feats[ix] = embeddings.data.cpu().numpy()
+
+        # with open('./data/paratalk/word_embeddings.pkl', 'wb') as f:
+        #     pickle.dump(self.word_bert_feats, f)
+
+        with open('./data/paratalk/word_embeddings.pkl', 'rb') as f:
+            self.word_bert_feats = pickle.load(f)
 
         # save bert features
         self.bert_tokens = bert_features
@@ -242,9 +257,17 @@ class DataLoader(data.Dataset):
         
         # Extract BERT embeddings
         new_labels_tensor = torch.from_numpy(new_labels).long()
-        bert_labels_tensor = torch.from_numpy(new_labels).long()      
-        embeddings = self.bert_model(bert_labels_tensor)[0]
-        bert_feats = embeddings.data.cpu().numpy().astype(np.float32)
+        bert_labels_tensor = torch.from_numpy(bert_labels).long()      
+        #embeddings = self.bert_model(bert_labels_tensor)[0]
+        #bert_feats = embeddings.data.cpu().numpy().astype(np.float32)
+
+        # directly use static word embeddings
+
+        for b in range(new_labels.shape[0]):
+            for w in range(new_labels.shape[1]):
+                bert_feats[b, w, :] = self.word_bert_feats[new_labels[b,w]]
+        bert_feats = bert_feats.astype(np.float32)
+        # ipdb.set_trace()
         
         data['labels'] = new_labels
         data['bert_feats'] = bert_feats

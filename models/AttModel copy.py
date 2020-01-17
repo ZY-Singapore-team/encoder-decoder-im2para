@@ -240,11 +240,11 @@ class AttModel(CaptionModel):
         # return the samples and their log likelihoods
         return seq.transpose(0, 1), seqLogprobs.transpose(0, 1)
 
-    def _sample(self, bert_feats, fc_feats, att_feats, att_masks=None, opt={}):
+    def _sample(self, bert_info, fc_feats, att_feats, att_masks=None, opt={}):
 
         # bert_tokens: (batch_size, max_seq_len)
-        # bert_tokens = bert_info['tokens']
-        # ix_to_BERT = bert_info['vocab']
+        bert_tokens = bert_info['tokens']
+        ix_to_BERT = bert_info['vocab']
         att_feats, att_masks = self.clip_att(att_feats, att_masks)
 
         sample_max = opt.get('sample_max', 1)
@@ -268,6 +268,15 @@ class AttModel(CaptionModel):
         # seqLogprobs = []
         seq = fc_feats.new_zeros((batch_size, self.seq_length), dtype=torch.long)
         seqLogprobs = fc_feats.new_zeros(batch_size, self.seq_length)
+
+        # the initial bert hidden state
+        current_bert_tokens = bert_tokens[:, 0:1]
+        # current_bert_tokens = torch.from_numpy(current_bert_tokens).long()     
+        current_bert_feats = self.bert_model(current_bert_tokens)[0]
+        # current_bert_feats = embeddings.data.cpu().numpy().astype(np.float32)
+        # full_bert_tokens = current_bert_tokens.copy()
+        full_bert_tokens = current_bert_tokens.clone().detach()
+        current_bert_feats = current_bert_feats.squeeze(1)
 
         for t in range(self.seq_length + 1):
             if t == 0: # input <bos>
@@ -300,7 +309,19 @@ class AttModel(CaptionModel):
                 # seqLogprobs.append(sampleLogprobs.view(-1))
                 seqLogprobs[:,t-1] = sampleLogprobs.view(-1)
 
-            logprobs, state = self.get_logprobs_state(it, bert_feats[:, t, :], fc_feats, att_feats, p_att_feats, att_masks, state)
+            logprobs, state = self.get_logprobs_state(it, current_bert_feats, fc_feats, att_feats, p_att_feats, att_masks, state)
+            
+            # decode the current prediction word
+            # predicts: [batch_size, 1]
+            _, predicts = torch.max(torch.softmax(logprobs, 1), 1)
+            predicts = predicts.unsqueeze(1)
+            # should map predicts to BERT token ids
+            predicts_bert = np.array([ix_to_BERT[e] for e in predicts.flatten().cpu().numpy()]).reshape(predicts.shape)
+            predicts_bert = torch.from_numpy(predicts_bert).long().cuda()
+            # get current contexts
+            full_bert_tokens = torch.cat((full_bert_tokens, predicts_bert), 1)
+            # extract bert feats
+            current_bert_feats = self.bert_model(full_bert_tokens)[0][:, -1, :]
 
             if decoding_constraint and t > 0:
                 tmp = output.new_zeros(output.size(0), self.vocab_size + 1)
