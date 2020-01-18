@@ -69,6 +69,7 @@ def train(opt):
 
     # Create model
     model = models.setup(opt).cuda()
+    model.loader = loader
     dp_model = torch.nn.DataParallel(model)
     dp_model.train()
 

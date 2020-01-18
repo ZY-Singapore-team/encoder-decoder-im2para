@@ -269,6 +269,8 @@ class AttModel(CaptionModel):
         seq = fc_feats.new_zeros((batch_size, self.seq_length), dtype=torch.long)
         seqLogprobs = fc_feats.new_zeros(batch_size, self.seq_length)
 
+        current_pred = bert_feats[:, 0, :]
+
         for t in range(self.seq_length + 1):
             if t == 0: # input <bos>
                 it = fc_feats.new_zeros(batch_size, dtype=torch.long)
@@ -300,7 +302,16 @@ class AttModel(CaptionModel):
                 # seqLogprobs.append(sampleLogprobs.view(-1))
                 seqLogprobs[:,t-1] = sampleLogprobs.view(-1)
 
-            logprobs, state = self.get_logprobs_state(it, bert_feats[:, t, :], fc_feats, att_feats, p_att_feats, att_masks, state)
+            
+            logprobs, state = self.get_logprobs_state(it, current_pred, fc_feats, att_feats, p_att_feats, att_masks, state)
+            _, predicts = torch.max(torch.softmax(logprobs, 1), 1)
+            predicts = predicts.unsqueeze(1).data.cpu().numpy()
+            bert_feats = np.zeros((predicts.shape[0], predicts.shape[1], 768), dtype='float32')
+            for b in range(predicts.shape[0]):
+                for w in range(predicts.shape[1]):
+                    bert_feats[b, w, :] = self.loader.word_bert_feats[predicts[b,w]]
+            bert_feats = bert_feats.astype(np.float32)
+            current_pred = torch.from_numpy(bert_feats).float().squeeze(1).cuda()
 
             if decoding_constraint and t > 0:
                 tmp = output.new_zeros(output.size(0), self.vocab_size + 1)
