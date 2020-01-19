@@ -130,7 +130,7 @@ def eval_split(model, crit, loader, eval_kwargs={}):
         # seq: [batch_size, max_seq_len]
         bert_info = {'vocab': loader.ix_to_BERT, 'tokens': bert_labels}
         with torch.no_grad():
-            seq = model(bert_info, fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')[0].data
+            seq = model(bert_info, bert_feats, sent_bert_feats, fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')[0].data
 
         # Print beam search
         if beam_size > 1 and verbose_beam:

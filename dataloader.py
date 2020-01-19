@@ -12,9 +12,9 @@ from functools import reduce
 from transformers import BertModel
 warnings.filterwarnings("ignore")
 
-# import ipdb
+from tqdm import tqdm
+import pickle
 
-# import multiprocessing
 
 class DataLoader(data.Dataset):
 
@@ -31,6 +31,50 @@ class DataLoader(data.Dataset):
 
     def get_seq_length(self):
         return self.seq_length
+
+    def extract_static_word_bert(self):
+        print('building static word BERT...')
+        # extract static BERT features
+        self.word_bert_feats = {}
+        for ix, bert_id in tqdm(self.ix_to_BERT.items()):
+            word_corpus = torch.from_numpy(np.array([101, int(bert_id), 102])).unsqueeze(0)   
+            embeddings = self.bert_model(word_corpus)[0][:, 0, :].squeeze(0)
+            self.word_bert_feats[ix] = embeddings.data.cpu().numpy()
+
+        with open(self.static_bert_path, 'wb') as f:
+            pickle.dump(self.word_bert_feats, f)
+        return self.word_bert_feats
+
+    def extract_static_sent_bert(self):
+        print('building static sentence BERT...')
+        # rebuild sentence-wise bert content
+        sub_tokens = []
+        self.sent_bert_feats = {}
+        count = 0
+        for sent_id, content in self.bert_tokens.items():
+            if content['bert_tokens']==[]:
+                continue
+            s_ind = [j for j, t in enumerate(content['bert_tokens']) if t==self.sep_index]
+            sent_content = np.split(content['bert_tokens'], s_ind)[:-2]
+            sent_content = [i[1:] for i in sent_content]
+
+            single_embeddings = list()
+            for i, sent in enumerate(sent_content):
+                new_sent_content = list()
+                new_sent_content.append(self.cls_index)
+                for token in sent:
+                    new_sent_content.append(token)
+                new_sent_content.append(self.sep_index)                       
+                nb_tensor = torch.from_numpy(np.array(new_sent_content).astype(np.int)).long().unsqueeze(0)
+                single_embeddings.append(self.bert_model(nb_tensor)[0][:,0,:].squeeze(0).data.cpu().numpy())
+            self.sent_bert_feats[sent_id] = np.array(single_embeddings)
+            if count % 3000 == 1:
+                print('%d paragraphs done'%count)
+            count += 1
+        
+        with open(self.static_sent_bert_path, 'wb') as f:
+            pickle.dump(self.sent_bert_feats, f)
+        return self.sent_bert_feats
 
     # change the vocab and token ids based on bert tokenization
     def update_bert_tokens(self, bert_vocab_path, bert_features):
@@ -67,49 +111,34 @@ class DataLoader(data.Dataset):
             bert_features[sent_id]['bert_tokens'] = content['tokens'].copy()
             for ind, token in enumerate(content['tokens']):
                 bert_features[sent_id]['tokens'][ind] = BERT_to_idx[token]        
-
         # save bert features
         self.bert_tokens = bert_features
 
-        # get the index of full stop of the dictionary
-        self.cls_index = 101
-        self.sep_index = 102
-        max_sent_len = 50
-        self.cls_bert_index = BERT_to_idx[self.cls_index]
-        self.sep_bert_index = BERT_to_idx[self.sep_index]
+        if os.path.exists(self.static_bert_path):
+            with open(self.static_bert_path, 'rb') as f:
+                self.word_bert_feats = pickle.load(f)
+        else:
+            self.word_bert_feats = self.extract_static_word_bert()
 
-        # rebuild sentence-wise bert content
-        sent_bert_tokens = {}
-        for sent_id, content in bert_features.items():
-            if content['bert_tokens']==[]:
-                continue
-            s_ind = [j for j, t in enumerate(content['bert_tokens']) if t==self.sep_index]
-            sent_content = np.split(content['bert_tokens'], s_ind)[:-2]
-            sent_content = [i[1:] for i in sent_content]
-            new_sent_content = np.zeros((len(sent_content),max_sent_len+2))
-            for i, sent in enumerate(sent_content):
-                new_sent_content[i,0] = self.cls_index
-                for ind, token in enumerate(sent):
-                    if ind < max_sent_len:
-                        new_sent_content[i,ind+1] = token
-                    else:
-                        ind = ind-1
-                        break
-                new_sent_content[i,ind+2] = self.sep_index
-            sent_bert_tokens[sent_id] = new_sent_content.astype(np.int)
+        if os.path.exists(self.static_sent_bert_path):
+            with open(self.static_sent_bert_path, 'rb') as f:
+                self.sent_bert_feats = pickle.load(f)
+        else:
+            self.sent_bert_feats = self.extract_static_sent_bert()            
+        print('static BERT features loaded!')
 
-        self.sent_bert_tokens = sent_bert_tokens
-
-        self.max_sent_len = max_sent_len
-
-        return vocab_size, self.sep_bert_index
+        return vocab_size, self.BERT_to_idx[self.cls_index], self.BERT_to_idx[self.sep_index]
 
 
     def __init__(self, opt):
         self.opt = opt
         self.batch_size = self.opt.batch_size
         self.seq_per_img = opt.seq_per_img
-        self.caption_model = opt.caption_model
+        self.static_bert_path = opt.static_bert_path
+        self.static_sent_bert_path = opt.static_sent_bert_path
+        self.cls_index = 101
+        self.sep_index = 102
+        self.max_sent_len = 50
 
         # BERT model
         self.bert_model = BertModel.from_pretrained("bert-base-cased")
@@ -266,46 +295,34 @@ class DataLoader(data.Dataset):
                 new_labels[ind, 1:-1] = self.bert_tokens[sample['id']]['tokens'].astype(np.int)
                 bert_labels[ind, 1:-1] = self.bert_tokens[sample['id']]['bert_tokens'].astype(np.int)
 
-        # Extract BERT embeddings
-        new_labels_tensor = torch.from_numpy(new_labels).long()
-        bert_labels_tensor = torch.from_numpy(bert_labels).long()      
-        embeddings = self.bert_model(bert_labels_tensor)[0]
-        bert_feats = embeddings.data.cpu().numpy().astype(np.float32)
+        ## Extract dynamic BERT embeddings
+        # new_labels_tensor = torch.from_numpy(new_labels).long()
+        # bert_labels_tensor = torch.from_numpy(bert_labels).long()      
+        # embeddings = self.bert_model(bert_labels_tensor)[0]
+        # bert_feats = embeddings.data.cpu().numpy().astype(np.float32)
+
+        # directly use static word embeddings
+        for b in range(new_labels.shape[0]):
+            for w in range(new_labels.shape[1]):
+                bert_feats[b, w, :] = self.word_bert_feats[new_labels[b,w]]
+        bert_feats = bert_feats.astype(np.float32)        
         data['labels'] = new_labels    
         data['bert_labels'] = bert_labels    
         data['bert_feats'] = bert_feats
 
-        # Extract Sentence BERT embeddings 
-        sub_tokens = []
-        nb_dict = {}
-        for ind, sample in enumerate(data['infos']):
-            # get sub sentence bert tokens
-            if sample['id'] in self.sent_bert_tokens:
-                sample_bert_tokens = self.sent_bert_tokens[sample['id']]
-                sub_tokens.append(sample_bert_tokens)
-                nb_dict[sample['id']] = sample_bert_tokens.shape[0]
-            else:
-                continue
-        nb_tokens = np.concatenate(sub_tokens,axis=0)
-        nb_tensor = torch.from_numpy(nb_tokens).long()
-        nb_embeddings = self.bert_model(nb_tensor)[0]
-        nb_bert_feats= nb_embeddings.data.cpu().numpy().astype(np.float32)
-
         # Extract Sentence BERT embeddings  
-        sent_bert_feats = bert_feats
-        x = 0
+        sen_bert_feats = bert_feats
         for ind, sample in enumerate(data['infos']):
             # find [SEP] index across the paragraph
             sent_ind = [0]+[j for j, label in enumerate(bert_labels[ind,:]) if label==self.sep_index][:-1]
             # get sub sentence bert tokens
-            if sample['id'] in self.sent_bert_tokens:        
-                sub_bert_feats = nb_bert_feats[x:x+nb_dict[sample['id']],:]
+            if sample['id'] in self.sent_bert_feats:        
+                sub_bert_feats = self.sent_bert_feats[sample['id']]
                 for i in range(sub_bert_feats.shape[0]):
-                    sent_bert_feats[ind,sent_ind[i]+1:sent_ind[i+1],:] = sub_bert_feats[i, 0, :]
-                x+=nb_dict[sample['id']]
+                    sen_bert_feats[ind,sent_ind[i]+1:sent_ind[i+1],:] = sub_bert_feats[i]
             else:
                 continue
-        data['sent_bert_feats'] = sent_bert_feats
+        data['sent_bert_feats'] = sen_bert_feats
 
         # generate masks
         mask_batch = np.zeros((data['labels'].shape[0], data['labels'].shape[1]), dtype = 'float32')

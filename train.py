@@ -40,7 +40,7 @@ def train(opt):
             BERT_features = pickle.load(f)
 
     bert_vocab_path = opt.data_path + 'bert-base-cased-vocab.txt'
-    opt.vocab_size,opt.fs_index = loader.update_bert_tokens(bert_vocab_path, BERT_features)
+    opt.vocab_size, opt.st_index, opt.fs_index = loader.update_bert_tokens(bert_vocab_path, BERT_features)
     print('Vocabulary size: ' + str(opt.vocab_size))
 
     # Load pretrained model, info file, histories file
@@ -69,6 +69,7 @@ def train(opt):
 
     # Create model
     model = models.setup(opt).cuda()
+    model.loader = loader
     dp_model = torch.nn.DataParallel(model,device_ids=[0,1])
     dp_model.train()
 
@@ -114,9 +115,9 @@ def train(opt):
 
         # Unpack data
         torch.cuda.synchronize()
-        tmp = [data['bert_feats'], data['sent_bert_feats'], data['fc_feats'], data['att_feats'], data['labels'], data['masks'], data['att_masks']]
+        tmp = [data['bert_labels'], data['bert_feats'], data['sent_bert_feats'], data['fc_feats'], data['att_feats'], data['labels'], data['masks'], data['att_masks']]
         tmp = [_ if _ is None else torch.from_numpy(_).cuda() for _ in tmp]
-        bert_feats, sent_bert_feats, fc_feats, att_feats, labels, masks, att_masks = tmp
+        bert_labels, bert_feats, sent_bert_feats, fc_feats, att_feats, labels, masks, att_masks = tmp
         bert_feats.requires_grad = False
 
         # Forward pass and loss
@@ -163,12 +164,12 @@ def train(opt):
             if best_val_score is None or current_score > best_val_score:
                 best_val_score = current_score
                 best_flag = True
-            if not os.path.exists(os.path.join(opt.checkpoint_path, opt.caption_model)):
-                os.mkdir(os.path.join(opt.checkpoint_path, opt.caption_model))
-            checkpoint_path = os.path.join(opt.checkpoint_path, opt.caption_model, 'model.pth')
+            if not os.path.exists(os.path.join(opt.checkpoint_path)):
+                os.mkdir(os.path.join(opt.checkpoint_path))
+            checkpoint_path = os.path.join(opt.checkpoint_path, 'model.pth')
             torch.save(model.state_dict(), checkpoint_path)
             print("model saved to {}".format(checkpoint_path))
-            optimizer_path = os.path.join(opt.checkpoint_path, opt.caption_model, 'optimizer.pth')
+            optimizer_path = os.path.join(opt.checkpoint_path, 'optimizer.pth')
             torch.save(optimizer.state_dict(), optimizer_path)
 
             # Dump miscalleous informations
@@ -183,19 +184,19 @@ def train(opt):
             histories['loss_history'] = loss_history
             histories['lr_history'] = lr_history
             histories['ss_prob_history'] = ss_prob_history
-            with open(os.path.join(opt.checkpoint_path, opt.caption_model, 'infos_'+opt.id+'.pkl'), 'wb') as f:
+            with open(os.path.join(opt.checkpoint_path, 'infos_'+opt.id+'.pkl'), 'wb') as f:
                 pickle.dump(infos, f)
-            with open(os.path.join(opt.checkpoint_path, opt.caption_model, 'histories_'+opt.id+'.pkl'), 'wb') as f:
+            with open(os.path.join(opt.checkpoint_path, 'histories_'+opt.id+'.pkl'), 'wb') as f:
                 pickle.dump(histories, f)
 
             # Save model to unique file if new best model
             if best_flag:
                 model_fname = 'model-best-i{:05d}-score{:.4f}.pth'.format(iteration, best_val_score)
                 infos_fname = 'model-best-i{:05d}-infos.pkl'.format(iteration)
-                checkpoint_path = os.path.join(opt.checkpoint_path, opt.caption_model, model_fname)
+                checkpoint_path = os.path.join(opt.checkpoint_path, model_fname)
                 torch.save(model.state_dict(), checkpoint_path)
                 print("model saved to {}".format(checkpoint_path)) 
-                with open(os.path.join(opt.checkpoint_path, opt.caption_model, infos_fname), 'wb') as f:
+                with open(os.path.join(opt.checkpoint_path, infos_fname), 'wb') as f:
                     pickle.dump(infos, f)
 
         # Stop if reaching max epochs

@@ -22,6 +22,12 @@ def parse_opt():
     parser.add_argument('--input_json', type=str, default='data/paratalk/paratalk.json',
                     help='path to the json file containing additional info and vocab')
 
+    parser.add_argument('--static_bert_path',type=str, default='data/paratalk/word_embeddings.pkl',
+                    help='path to the static bert word vectors')
+
+    parser.add_argument('--static_sent_bert_path',type=str, default='data/paratalk/sent_embeddings.pkl',
+                    help='path to the static bert sent vectors')
+
     parser.add_argument('--input_fc_dir', type=str, default='/data/liangming/parabu_fc',
                     help='path to the directory containing the preprocessed fc feats')
 
@@ -49,8 +55,8 @@ def parse_opt():
                     help='Cached bert features; if empty, then calculate it from scrach.')
 
     # Model settings
-    parser.add_argument('--caption_model', type=str, default="hierarchical",
-                        help='hierarchical,sct')
+    parser.add_argument('--caption_model', type=str, default="htopdown",
+                        help='hadaptive,sct')
     parser.add_argument('--block_trigrams', type=int, default=0,
                     help='flag to block trigrams (0=F, 1=T), default 0')
     parser.add_argument('--alpha', type=float, default=0.0,
