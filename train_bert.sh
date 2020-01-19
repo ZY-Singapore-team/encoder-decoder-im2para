@@ -4,7 +4,7 @@ python -W ignore train.py \
     --input_fc_dir '/data/liangming/parabu_fc' \
     --input_json 'data/paratalk/paratalk.json' \
     --input_label_h5 'data/paratalk/paratalk_label.h5' \
-    --static_bert_path 'data/paratalk/word_embeddings.pkl'\
+    --static_bert_path 'data/paratalk/new_word_embeddings.pkl'\
     --static_sent_bert_path 'data/paratalk/sent_embeddings.pkl'\
     --language_eval 1 \
     --learning_rate 5e-4 \
@@ -22,4 +22,3 @@ python -W ignore train.py \
     --gpu 0,1 \
     --print_freq 100 \
     --beam_size 1 \
-    # --start_from 'bert_test/hadaptive'

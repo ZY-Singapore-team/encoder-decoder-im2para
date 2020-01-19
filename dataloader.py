@@ -32,14 +32,45 @@ class DataLoader(data.Dataset):
     def get_seq_length(self):
         return self.seq_length
 
+    # def extract_static_word_bert(self):
+    #     print('building static word BERT...')
+    #     # extract static BERT features
+    #     self.word_bert_feats = {}
+    #     for ix, bert_id in tqdm(self.ix_to_BERT.items()):
+    #         word_corpus = torch.from_numpy(np.array([101, int(bert_id), 102])).unsqueeze(0)   
+    #         embeddings = self.bert_model(word_corpus)[0][:, 0, :].squeeze(0)
+    #         self.word_bert_feats[ix] = embeddings.data.cpu().numpy()
+
+    #     with open(self.static_bert_path, 'wb') as f:
+    #         pickle.dump(self.word_bert_feats, f)
+    #     return self.word_bert_feats
+
     def extract_static_word_bert(self):
         print('building static word BERT...')
         # extract static BERT features
+        sub_tokens = []
         self.word_bert_feats = {}
-        for ix, bert_id in tqdm(self.ix_to_BERT.items()):
-            word_corpus = torch.from_numpy(np.array([101, int(bert_id), 102])).unsqueeze(0)   
-            embeddings = self.bert_model(word_corpus)[0][:, 0, :].squeeze(0)
-            self.word_bert_feats[ix] = embeddings.data.cpu().numpy()
+        count = 0
+        for sent_id, content in self.bert_tokens.items():
+            if content['bert_tokens']==[]:
+                continue
+            s_ind = [j for j, t in enumerate(content['bert_tokens']) if t==self.sep_index]
+            sent_content = np.split(content['bert_tokens'], s_ind)[:-2]
+            sent_content = [i[1:] for i in sent_content]
+
+            single_embeddings = list()
+            for i, sent in enumerate(sent_content):
+                new_sent_content = list()
+                new_sent_content.append(self.cls_index)
+                for token in sent:
+                    new_sent_content.append(token)
+                new_sent_content.append(self.sep_index)                       
+                nb_tensor = torch.from_numpy(np.array(new_sent_content).astype(np.int)).long().unsqueeze(0)
+                single_embeddings.append(self.bert_model(nb_tensor)[0].squeeze(0).data.cpu().numpy())
+            self.word_bert_feats[sent_id] = single_embeddings
+            if count % 3000 == 1:
+                print('%d paragraphs done'%count)
+            count += 1
 
         with open(self.static_bert_path, 'wb') as f:
             pickle.dump(self.word_bert_feats, f)

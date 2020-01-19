@@ -15,11 +15,11 @@ python -W ignore train.py \
     --input_encoding_size 768 \
     --val_images_use 5000 \
     --save_checkpoint_every 10 \
-    --checkpoint_path 'bert_test/hadaptive' \
-    --caption_model hadaptive \
+    --checkpoint_path 'bert_test/' \
+    --caption_model htopdown \
     --num_layers 3 \
     --id 'bert' \
     --gpu 0,1 \
     --print_freq 100 \
     --beam_size 1 \
-    --start_from 'bert_test/hadaptive'
+    --start_from 'bert_test/'

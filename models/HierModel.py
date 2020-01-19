@@ -280,33 +280,40 @@ class HierModel(CaptionModel):
                 # seqLogprobs.append(sampleLogprobs.view(-1))
                 seqLogprobs[:,t-1] = sampleLogprobs.view(-1)
 
-            logprobs, state, old_state, old_att = self.get_logprobs_state(it, current_pred, sen_bert_feats[:,t,:], fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att)
+            logprobs, state, old_state, old_att = self.get_logprobs_state(it, current_pred, current_sen_pred, fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att)
 
             _, predicts = torch.max(torch.softmax(logprobs, 1), 1)
-            predicts = predicts.unsqueeze(1).data.cpu().numpy()
-            bert_feats = np.zeros((predicts.shape[0], predicts.shape[1], 768), dtype='float32')
-            for b in range(predicts.shape[0]):
-                for w in range(predicts.shape[1]):
-                    bert_feats[b, w, :] = self.loader.word_bert_feats[predicts[b,w]]
+            predicts = predicts.unsqueeze(1)
+            new_predicts = predicts.data.cpu().numpy()
+            bert_feats = np.zeros((new_predicts.shape[0], new_predicts.shape[1], 768), dtype='float32')
+            for b in range(new_predicts.shape[0]):
+                for w in range(new_predicts.shape[1]):
+                    bert_feats[b, w, :] = self.loader.word_bert_feats[new_predicts[b,w]]
             bert_feats = bert_feats.astype(np.float32)
             current_pred = torch.from_numpy(bert_feats).float().squeeze(1).cuda()                        
 
-            # logprobs, state, old_state, old_att = self.get_logprobs_state(it, current_pred, current_pred, fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att)
-            # _, predicts = torch.max(torch.softmax(logprobs, 1), 1)           
-            # predicts = predicts.unsqueeze(1)
-            # udpate dynamic sentence BERT prediction
-            # predicts_bert = [ix_to_BERT[e] for e in predicts.flatten().cpu().numpy()]
-            # for i, index in enumerate(predicts_bert):
-            #     total_token_list[i].append(index) 
-            #     if index==ix_to_BERT[self.fs_index]:
-            #         out_records[i].append(t)
-            #         if len(out_records[i])==1:
-            #             out_list = ix_to_BERT[self.st_index] + [total_token_list[i][n] for n in range(t+1)]
-            #         else:
-            #             previous_ind = out_records[i][-2]
-            #             out_list = ix_to_BERT[self.st_index] + [total_token_list[i][n] for n in range(previous_ind+1, t+1)]
-            #         out_token = torch.from_numpy(np.array(out_list)).long().unsqueeze(0).cuda()
-            #         current_sen_pred[i] = self.bert_model(out_token)[0][:,0,:].squeeze(0)      
+            # # udpate dynamic sentence BERT prediction
+            predicts_bert = [ix_to_BERT[e] for e in predicts.flatten().cpu().numpy()]
+            for i, index in enumerate(predicts_bert):
+                total_token_list[i].append(index) 
+                if index==ix_to_BERT[self.fs_index]:
+                    out_records[i].append(t)
+                    if len(out_records[i])==1:
+                        out_list = ix_to_BERT[self.st_index] + [total_token_list[i][n] for n in range(t+1)]
+                    else:
+                        previous_ind = out_records[i][-2]
+                        out_list = ix_to_BERT[self.st_index] + [total_token_list[i][n] for n in range(previous_ind+1, t+1)]
+                else:
+                    if len(out_records[i])==0:
+                        out_list = ix_to_BERT[self.st_index] + [total_token_list[i][n] for n in range(t+1)] + ix_to_BERT[self.fs_index]
+                    elif len(out_records[i])==1:
+                        previous_ind = out_records[i][0]
+                        out_list = ix_to_BERT[self.st_index] + [total_token_list[i][n] for n in range(previous_ind+1,t+1)] + ix_to_BERT[self.fs_index]                      
+                    else:
+                        previous_ind = out_records[i][-2]
+                        out_list = ix_to_BERT[self.st_index] + [total_token_list[i][n] for n in range(previous_ind+1,t+1)] + ix_to_BERT[self.fs_index] 
+                out_token = torch.from_numpy(np.array(out_list)).long().unsqueeze(0).cuda()
+                current_sen_pred[i] = self.bert_model(out_token)[0][:,0,:].squeeze(0)      
 
             if decoding_constraint and t > 0:
                 tmp = output.new_zeros(output.size(0), self.vocab_size + 1)
@@ -398,6 +405,7 @@ class AdaAtt_lstm(nn.Module):
         self.h2h = nn.ModuleList([nn.Linear(self.rnn_size, (4+(use_maxout==True)) * self.rnn_size) for _ in range(1)])
 
         # Layers for getting the fake region
+        self.r_w2h = nn.Linear(self.input_encoding_size, self.rnn_size)
         self.r_v2h = nn.Linear(self.rnn_size, self.rnn_size)
         self.r_h2h = nn.Linear(self.rnn_size, self.rnn_size)
 
@@ -431,7 +439,7 @@ class AdaAtt_lstm(nn.Module):
         tanh_nex_c = F.tanh(next_c)
         next_h = out_gate * tanh_nex_c
 
-        i2h = self.r_v2h(img_fc)
+        i2h = self.r_w2h(x) + self.r_v2h(img_fc)
         gt = i2h+self.r_h2h(prev_h)
         fake_region = F.sigmoid(gt) * tanh_nex_c
         cs = [next_c]
@@ -521,7 +529,7 @@ class HTopDownCore(nn.Module):
     def forward(self, cs_index, st, xt, fc_feats, att_feats, p_att_feats, state, old_state, old_att, att_masks=None):
 
         ####################sentence level######################
-        prev_h = state[0][1]
+        prev_h = state[0][0]
         att_lstm_input = torch.cat([prev_h, st, fc_feats], 1)
 
         h_att, c_att = self.satt_lstm(att_lstm_input, (state[0][0], state[1][0]))
@@ -547,11 +555,10 @@ class HTopDownCore(nn.Module):
             state = (torch.stack([h_att, h_sen, h_word]), torch.stack([c_att, c_sen, c_word]))
 
         elif self.num_layers == 4:
-            prev_h_word = state[0][3]
+            prev_h_word = state[0][2]
             watt_lstm_input = torch.cat([xt, prev_h_word, fc_feats, topic_vector], 1)
             h_watt, c_watt = self.watt_lstm(watt_lstm_input, (state[0][2], state[1][2]))
-            watt = self.attention(h_watt, att_feats, p_att_feats, att_masks)
-            word_lstm_input = torch.cat([att, h_watt], 1)
+            word_lstm_input = torch.cat([old_att, h_watt], 1)
             h_word, c_word = self.word_lstm(word_lstm_input, (state[0][3], state[1][3]))
 
             output = F.dropout(h_word, self.drop_prob_lm, self.training)
@@ -594,7 +601,7 @@ class HAdaAttCore(nn.Module):
             state = (torch.stack([h_att, h_sen, h_word]), torch.stack([c_att, c_sen, c_word]))
 
         elif self.num_layers == 4:
-            prev_h_word = state[0][3]
+            prev_h_word = state[0][2]
             watt_lstm_input = torch.cat([xt, prev_h_word, fc_feats, topic_vector], 1)
             h_watt, c_watt = self.watt_lstm(watt_lstm_input, (state[0][2], state[1][2]))
             word_lstm_input = torch.cat([old_att, h_watt], 1)
