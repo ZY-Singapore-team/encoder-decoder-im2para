@@ -1,0 +1,23 @@
+python -W ignore train.py \
+    --batch_size 32 \
+    --input_att_dir '/data/ethanwang/projects/image-paragraph-captioning/data/parabu_att' \
+    --input_fc_dir '/data/ethanwang/projects/image-paragraph-captioning/data/parabu_fc' \
+    --input_json 'data/paratalk/paratalk.json' \
+    --input_label_h5 'data/paratalk/paratalk_label.h5' \
+    --language_eval 1 \
+    --learning_rate 3e-4 \
+    --learning_rate_decay_start 5 \
+    --scheduled_sampling_start -1 \
+    --max_epochs 60 \
+    --rnn_type 'lstm' \
+    --input_encoding_size 768 \
+    --num_layers 4 \
+    --val_images_use 5000 \
+    --save_checkpoint_every 2000 \
+    --checkpoint_path 'bert_test/htopdown' \
+    --caption_model htopdown \
+    --id 'bert' \
+    --print_freq 200 \
+    --gpu 0,1 \
+    --beam_size 1 \
+    #--start_from 'bert_test/htopdown'

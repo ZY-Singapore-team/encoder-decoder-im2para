@@ -9,13 +9,19 @@ import numpy as np
 import misc.utils as utils
 import torch
 
-from .HierModel import HTopDownModel, HAdaAttMOModel
+from .HierModel import HTopDownModel
+from .HierAdaModel import HAdaAttMOModel
 from .AttModel import TopDownModel
+from .HierCovModel import HCovModel 
+
 
 def setup(opt):
     if opt.caption_model == 'htopdown':
     	print('hierarchical top down model training...')
     	model = HTopDownModel(opt)
+    elif opt.caption_model == 'hcovtopdown':
+        print('hierarchical coverage attention model training...')
+        model = HCovModel(opt)            	
     elif opt.caption_model == 'hadaptive':
         print('hierarchical adaptive attention model training...')
         model = HAdaAttMOModel(opt)        

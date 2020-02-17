@@ -178,6 +178,34 @@ class AttModel(CaptionModel):
 
         return logprobs, state
 
+    def extract_bert_feats(self):
+        bert_feats = np.zeros((data['labels'].shape[0], data['labels'].shape[1], self.opt.input_encoding_size), dtype='float32')
+        new_labels = np.zeros((data['labels'].shape[0], data['labels'].shape[1]), dtype = 'int')
+
+        for ind, sample in enumerate(data['infos']):
+            if len(self.bert_tokens[sample['id']]['tokens']) == 0:
+                continue
+            else:
+                new_labels[ind, 1:-1] = self.bert_tokens[sample['id']]['tokens'].astype(np.int)
+        
+        # Extract BERT embeddings
+        new_labels_tensor = torch.from_numpy(new_labels).long()         
+        embeddings = self.bert_model(new_labels_tensor)[0]
+        bert_feats = embeddings.data.cpu().numpy().astype(np.float32)
+        
+        data['labels'] = new_labels
+        data['bert_feats'] = bert_feats
+
+        # generate masks
+        mask_batch = np.zeros((data['labels'].shape[0], data['labels'].shape[1]), dtype = 'float32')
+        nonzeros = np.array(list(map(lambda x: (x != 0).sum()+2, data['labels'])))
+        for ix, row in enumerate(mask_batch):
+            row[:nonzeros[ix]] = 1
+        data['masks'] = mask_batch
+
+        return data
+
+
     # This is for inference, should apply none teacher-forcing. 
     def inference_logprobs_state(self, it, previous_seq, fc_feats, att_feats, p_att_feats, att_masks, state):
         # previous_seq: [batch_size, pre_len]
@@ -728,9 +756,9 @@ class AdaAttModel(AttModel):
         self.core = AdaAttCore(opt)
 
 # AdaAtt with maxout lstm
-class AdaAttMOModel(AttModel):
+class HAdaAttMOModel(AttModel):
     def __init__(self, opt):
-        super(AdaAttMOModel, self).__init__(opt)
+        super(HAdaAttMOModel, self).__init__(opt)
         self.core = AdaAttCore(opt, True)
 
 class Att2in2Model(AttModel):

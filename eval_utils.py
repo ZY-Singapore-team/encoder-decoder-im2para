@@ -18,6 +18,7 @@ from pycocoevalcap.meteor.meteor import Meteor
 from pycocoevalcap.rouge.rouge import Rouge
 from pycocoevalcap.cider.cider import Cider
 
+import ipdb
 
 def eval_multi_metrics(ground_turth, predictions):
     # scorers = [
@@ -80,7 +81,7 @@ def language_eval(bert_tokens, preds, model_id, split):
     lang_stat = eval_multi_metrics(ground_turth, predictions)
     return lang_stat
 
-def eval_split(model, crit, loader, eval_kwargs={}):
+def eval_split(opt, model, crit, loader, eval_kwargs={}):
     verbose = eval_kwargs.get('verbose', True)
     verbose_beam = eval_kwargs.get('verbose_beam', 1)
     verbose_loss = eval_kwargs.get('verbose_loss', 1)
@@ -110,9 +111,11 @@ def eval_split(model, crit, loader, eval_kwargs={}):
             tmp = [data['bert_labels'], data['bert_feats'], data['sent_bert_feats'], data['fc_feats'], data['att_feats'], data['labels'], data['masks'], data['att_masks']]
             tmp = [torch.from_numpy(_).cuda() if _ is not None else _ for _ in tmp]
             bert_labels, bert_feats, sent_bert_feats, fc_feats, att_feats, labels, masks, att_masks = tmp
-
             with torch.no_grad():
-                loss = crit(model(bert_feats, sent_bert_feats, fc_feats, att_feats, labels, att_masks), labels[:,1:], masks[:,1:]).item()
+                if opt.caption_model == 'btopdown':
+                    loss = crit(model(bert_feats, fc_feats, att_feats, labels, att_masks), labels[:,1:], masks[:,1:]).item()
+                else:
+                    loss = crit(model(bert_feats, sent_bert_feats, fc_feats, att_feats, labels, att_masks), labels[:,1:], masks[:,1:]).item()                    
             loss_sum = loss_sum + loss
             loss_evals = loss_evals + 1
 
@@ -128,9 +131,14 @@ def eval_split(model, crit, loader, eval_kwargs={}):
         bert_labels, bert_feats, sent_bert_feats, fc_feats, att_feats, att_masks = tmp
         # forward the model to also get generated samples for each image
         # seq: [batch_size, max_seq_len]
-        bert_info = {'vocab': loader.ix_to_BERT, 'tokens': bert_labels}
+        bert_info = {'vocab': loader.ix_to_BERT, 'tokens': loader.ix_to_word}
         with torch.no_grad():
-            seq = model(bert_info, bert_feats, sent_bert_feats, fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')[0].data
+            if opt.caption_model == 'btopdown':
+                seq = model(bert_feats, fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')[0].data
+            else:
+                seq = model(bert_info, bert_feats, fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')[0].data
+        
+        # import ipdb; ipdb.set_trace()
 
         # Print beam search
         if beam_size > 1 and verbose_beam:

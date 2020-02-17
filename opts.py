@@ -22,12 +22,6 @@ def parse_opt():
     parser.add_argument('--input_json', type=str, default='data/paratalk/paratalk.json',
                     help='path to the json file containing additional info and vocab')
 
-    parser.add_argument('--static_bert_path',type=str, default='data/paratalk/word_embeddings.pkl',
-                    help='path to the static bert word vectors')
-
-    parser.add_argument('--static_sent_bert_path',type=str, default='data/paratalk/sent_embeddings.pkl',
-                    help='path to the static bert sent vectors')
-
     parser.add_argument('--input_fc_dir', type=str, default='/data/liangming/parabu_fc',
                     help='path to the directory containing the preprocessed fc feats')
 
@@ -39,6 +33,12 @@ def parse_opt():
 
     parser.add_argument('--input_box_dir', type=str, default='data/cocotalk_box',
                 help='path to the directory containing the boxes of att feats')
+
+    parser.add_argument('--static_bert_path',type=str, default='data/paratalk/word_embeddings.pkl',
+                    help='path to the static bert word vectors')
+
+    parser.add_argument('--static_sent_bert_path',type=str, default='data/paratalk/sent_embeddings.pkl',
+                    help='path to the static bert sent vectors')    
 
     parser.add_argument('--start_from', type=str, default=None,
                     help="""continue training from saved model at this path. Path must contain files saved by previous training process: 
@@ -55,16 +55,16 @@ def parse_opt():
                     help='Cached bert features; if empty, then calculate it from scrach.')
 
     # Model settings
-    parser.add_argument('--caption_model', type=str, default="htopdown",
-                        help='hadaptive,sct')
+    parser.add_argument('--caption_model', type=str, default="btopdown",
+                        help='hadaptive,btopdown,htopdown,hcovtopdown')    
     parser.add_argument('--block_trigrams', type=int, default=0,
                     help='flag to block trigrams (0=F, 1=T), default 0')
     parser.add_argument('--alpha', type=float, default=0.0,
                     help='repetition-blocking hyperparameter, default 0.0')
     parser.add_argument('--rnn_size', type=int, default=512,
                     help='size of the rnn in number of hidden nodes in each layer')
-    parser.add_argument('--num_layers', type=int, default=3,
-                    help='number of layers in the RNN. double attention if 4, single attention if 3')
+    parser.add_argument('--num_layers', type=int, default=1,
+                    help='number of layers in the RNN')
     parser.add_argument('--rnn_type', type=str, default='lstm',
                     help='rnn, gru, or lstm')
     parser.add_argument('--input_encoding_size', type=int, default=512,
@@ -97,6 +97,7 @@ def parse_opt():
                     help='number of captions to sample for each image during training. Done for efficiency since CNN forward pass is expensive. E.g. coco has 5 sents/image')
     parser.add_argument('--beam_size', type=int, default=1,
                     help='used when sample_max = 1, indicates number of beams in beam search. Usually 2 or 3 works well. More is not better. Set this to 1 for faster runtime but a bit worse performance.')
+
     # Optimization: Language Model
     parser.add_argument('--optim', type=str, default='adam',
                     help='what update to use? rmsprop|sgd|sgdmom|adagrad|adam')
@@ -104,9 +105,9 @@ def parse_opt():
                     help='learning rate')
     parser.add_argument('--learning_rate_decay_start', type=int, default=-1, 
                     help='at what iteration to start decaying learning rate? (-1 = dont) (in epoch)')
-    parser.add_argument('--learning_rate_decay_every', type=int, default=3, 
+    parser.add_argument('--learning_rate_decay_every', type=int, default=2, 
                     help='every how many iterations thereafter to drop LR?(in epoch)')
-    parser.add_argument('--learning_rate_decay_rate', type=float, default=0.8, 
+    parser.add_argument('--learning_rate_decay_rate', type=float, default=0.9, 
                     help='every how many iterations thereafter to drop LR?(in epoch)')
     parser.add_argument('--optim_alpha', type=float, default=0.9,
                     help='alpha for adam')
@@ -141,7 +142,7 @@ def parse_opt():
 
     # Misc
     parser.add_argument('--gpu', type=str, default="0",
-                        help='gpu_id')
+                        help='gpu_id')    
     parser.add_argument('--id', type=str, default='tmp_test',
                     help='an id identifying this run/job. used in cross-val and appended when writing progress files')
     parser.add_argument('--train_only', type=int, default=0,

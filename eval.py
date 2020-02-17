@@ -139,7 +139,7 @@ loader.ix_to_word = infos['vocab']
 
 
 # Set sample options
-loss, split_predictions, lang_stats = eval_utils.eval_split(model, crit, loader, opt.caption_model, 
+loss, split_predictions, lang_stats = eval_utils.eval_split(model, crit, loader, 
     vars(opt))
 
 print('loss: ', loss)

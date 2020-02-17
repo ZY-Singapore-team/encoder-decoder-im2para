@@ -13,7 +13,6 @@
 __pycache__/
 log*
 copies/*
-data/parabu_att/*
-data/parabu_fc/*
+data/cased_L-12_H-768_A-12/*
 bert_test/*
 eval_results/*

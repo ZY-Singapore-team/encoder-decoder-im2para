@@ -114,6 +114,7 @@ class AttModel(CaptionModel):
         outputs = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size+1)
 
         fc_feats, att_feats, p_att_feats = self._prepare_feature(fc_feats, att_feats, att_masks)
+        coverage = fc_feats.new_zeros(batch_size,att_feats.shape[1])
 
         for i in range(seq.size(1) - 1):
             if self.training and i >= 1 and self.ss_prob > 0.0: # otherwiste no need to sample
@@ -132,14 +133,14 @@ class AttModel(CaptionModel):
             if i >= 1 and seq[:, i].sum() == 0:
                 break
 
-            output, state, old_state, old_att = self.get_logprobs_state(it, bert_feats[:, i, :], sen_bert_feats[:, i, :], fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att)
+            output, state, old_state, old_att, coverage = self.get_logprobs_state(it, bert_feats[:, i, :], sen_bert_feats[:, i, :], fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att, coverage)
             outputs[:, i] = output
             # outputs.append(output)
 
         return outputs
         # return torch.cat([_.unsqueeze(1) for _ in outputs], 1)
 
-    def get_logprobs_state(self, it, bert_feats, sen_bert_feats, fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att):
+    def get_logprobs_state(self, it, bert_feats, sen_bert_feats, fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att, coverage):
         # 'it' contains a word index (batch_size * 1)
         # xt = self.embed(it)
         
@@ -148,10 +149,10 @@ class AttModel(CaptionModel):
         xt = bert_feats.detach()
         cs_index = it == int(self.fs_index)
 
-        output, state, old_state, old_att = self.core(cs_index, st, xt, fc_feats, att_feats, p_att_feats, state, old_state, old_att, att_masks)
+        output, state, old_state, old_att, coverage = self.core(cs_index, st, xt, fc_feats, att_feats, p_att_feats, state, old_state, old_att, coverage, att_masks)
         logprobs = F.log_softmax(self.logit(output), dim=1)
 
-        return logprobs, state, old_state, old_att
+        return logprobs, state, old_state, old_att, coverage
 
     # This is for inference, should apply none teacher-forcing. 
     def inference_logprobs_state(self, it, previous_seq, fc_feats, att_feats, p_att_feats, att_masks, state):
@@ -210,6 +211,7 @@ class AttModel(CaptionModel):
         old_att = fc_feats.new_zeros(batch_size, self.rnn_size)
 
         fc_feats, att_feats, p_att_feats = self._prepare_feature(fc_feats, att_feats, att_masks)
+        coverage = fc_feats.new_zeros(batch_size, att_feats.shape[1])
 
         # BEG MODIFIED
         trigrams = [] # will be a list of batch_size dictionaries
@@ -254,7 +256,7 @@ class AttModel(CaptionModel):
                 # seqLogprobs.append(sampleLogprobs.view(-1))
                 seqLogprobs[:,t-1] = sampleLogprobs.view(-1)
 
-            logprobs, state, old_state, old_att = self.get_logprobs_state(it, current_pred, current_sent_pred, fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att)
+            logprobs, state, old_state, old_att, coverage = self.get_logprobs_state(it, current_pred, current_sent_pred, fc_feats, att_feats, p_att_feats, att_masks, state, old_state, old_att, coverage)
             _, predicts = torch.max(torch.softmax(logprobs, 1), 1)
             predicts_bert = [bert_tokens[str(e)] for e in predicts.flatten().cpu().numpy()]
             predicts = predicts.unsqueeze(1).data.cpu().numpy()            
@@ -328,17 +330,19 @@ class TopDownCore(nn.Module):
 
         self.satt_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size * 2, opt.rnn_size) # we, fc, h^2_t-1
         self.sent_lstm = nn.LSTMCell(opt.rnn_size * 2, opt.rnn_size) # h^1_t, \hat v
-        self.watt_lstm = nn.LSTMCell(opt.input_encoding_size+opt.rnn_size * 2, opt.rnn_size)
-        self.word_lstm = nn.LSTMCell(opt.rnn_size * 3, opt.rnn_size)        
+        self.watt_lstm = nn.LSTMCell(opt.input_encoding_size+opt.rnn_size * 3, opt.rnn_size)
+        self.word_lstm = nn.LSTMCell(opt.rnn_size * 2, opt.rnn_size)        
         self.attention = Attention(opt)
 
-    def forward(self, cs_index, st, xt, fc_feats, att_feats, p_att_feats, state, old_state, old_att, att_masks=None):
+    def forward(self, cs_index, st, xt, fc_feats, att_feats, p_att_feats, state, old_state, old_att, coverage, att_masks=None):
         ####################sentence level######################
         prev_h = state[0][1]
         att_lstm_input = torch.cat([st, prev_h, fc_feats], 1)
 
         h_att, c_att = self.satt_lstm(att_lstm_input, (state[0][0], state[1][0]))
-        att = self.attention(h_att, att_feats, p_att_feats, att_masks)
+        att, att_dis, coverage = self.attention(h_att, att_feats, p_att_feats, coverage, att_masks)
+        coverage = coverage.view(att_dis.shape)
+        coverage += att_dis
 
         sen_lstm_input = torch.cat([att, h_att], 1)
         h_sen, c_sen = self.sent_lstm(sen_lstm_input, (state[0][1], state[1][1]))
@@ -362,16 +366,16 @@ class TopDownCore(nn.Module):
 
         elif self.num_layers == 4:
             prev_h_word = state[0][-1]
-            watt_lstm_input = torch.cat([xt, fc_feats, prev_h_word], 1)
+            watt_lstm_input = torch.cat([xt, fc_feats, prev_h_word, topic_vector], 1)
             h_watt, c_watt = self.watt_lstm(watt_lstm_input, (state[0][2], state[1][2]))
-            watt = self.attention(h_watt, att_feats, p_att_feats, att_masks)
-            word_lstm_input = torch.cat([topic_vector, watt, h_watt], 1)
+            # watt = self.attention(h_watt, att_feats, p_att_feats, att_masks)
+            word_lstm_input = torch.cat([sent_att, h_watt], 1)
             h_word, c_word = self.word_lstm(word_lstm_input, (state[0][3], state[1][3]))
 
             output = F.dropout(h_word, self.drop_prob_lm, self.training)
             state = (torch.stack([h_att, h_sen, h_watt, h_word]), torch.stack([c_att, c_sen, c_watt, c_word]))
 
-        return output, state, old_state, old_att
+        return output, state, old_state, old_att, coverage
 
 
 class Attention(nn.Module):
@@ -382,31 +386,33 @@ class Attention(nn.Module):
 
         self.h2att = nn.Linear(self.rnn_size, self.att_hid_size)
         self.alpha_net = nn.Linear(self.att_hid_size, 1)
+        self.W_c = nn.Linear(1, self.att_hid_size)
 
-    def forward(self, h, att_feats, p_att_feats, att_masks=None):
+    def forward(self, h, att_feats, p_att_feats, coverage, att_masks=None):
         # The p_att_feats here is already projected
         att_size = att_feats.numel() // att_feats.size(0) // self.rnn_size
         att = p_att_feats.view(-1, att_size, self.att_hid_size)
+        coverage_feature = self.W_c(coverage.clone().view(-1,1)) 
         
-        att_h = self.h2att(h)                        # batch * att_hid_size
-        att_h = att_h.unsqueeze(1).expand_as(att)            # batch * att_size * att_hid_size
+        att_h = self.h2att(h)                               # batch * att_hid_size
+        att_h = att_h.unsqueeze(1).expand_as(att)           # batch * att_size * att_hid_size
         dot = att + att_h                                   # batch * att_size * att_hid_size
-        dot = F.tanh(dot)                                # batch * att_size * att_hid_size
+        dot = F.tanh(dot)                                   # batch * att_size * att_hid_size
         dot = dot.view(-1, self.att_hid_size)               # (batch * att_size) * att_hid_size
-        dot = self.alpha_net(dot)                           # (batch * att_size) * 1
+        dot = self.alpha_net(dot + coverage_feature)        # (batch * att_size) * 1
         dot = dot.view(-1, att_size)                        # batch * att_size
         
-        weight = F.softmax(dot, dim=1)                             # batch * att_size
+        weight = F.softmax(dot, dim=1)                      # batch * att_size
         if att_masks is not None:
             weight = weight * att_masks.view(-1, att_size).float()
-            weight = weight / weight.sum(1, keepdim=True) # normalize to 1
+            weight = weight / weight.sum(1, keepdim=True)   # normalize to 1
         att_feats_ = att_feats.view(-1, att_size, self.rnn_size) # batch * att_size * att_feat_size
         att_res = torch.bmm(weight.unsqueeze(1), att_feats_).squeeze(1) # batch * att_feat_size
+        return att_res, weight, coverage
 
-        return att_res
 
-class HTopDownModel(AttModel):
+class HCovModel(AttModel):
     def __init__(self, opt):
-        super(HTopDownModel, self).__init__(opt)
+        super(HCovModel, self).__init__(opt)
         self.num_layers = opt.num_layers
         self.core = TopDownCore(opt)

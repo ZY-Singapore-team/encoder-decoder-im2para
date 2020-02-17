@@ -120,10 +120,16 @@ def train(opt):
         bert_labels, bert_feats, sent_bert_feats, fc_feats, att_feats, labels, masks, att_masks = tmp
         bert_feats.requires_grad = False
 
+        # bert_info = {'vocab': loader.ix_to_BERT, 'tokens': bert_labels}
+
         # Forward pass and loss
         optimizer.zero_grad()
-        outputs = dp_model(bert_feats, sent_bert_feats, fc_feats, att_feats, labels, att_masks)
+        if opt.caption_model == 'btopdown':
+            outputs = dp_model(bert_feats, fc_feats, att_feats, labels, att_masks)
+        else:
+            outputs = dp_model(bert_feats, sent_bert_feats, fc_feats, att_feats, labels, att_masks)
         loss = crit(outputs, labels[:,1:], masks[:,1:])
+        # ipdb.set_trace()
 
         # Backward pass
         loss.backward()
@@ -151,7 +157,7 @@ def train(opt):
             eval_kwargs = {'split': 'val',
                             'dataset': opt.input_json}
             eval_kwargs.update(vars(opt))
-            val_loss, predictions, lang_stats = eval_utils.eval_split(dp_model, crit, loader, eval_kwargs)
+            val_loss, predictions, lang_stats = eval_utils.eval_split(opt, dp_model, crit, loader, eval_kwargs)
 
             # Our metric is CIDEr if available, otherwise validation loss
             if opt.language_eval == 1:
@@ -164,8 +170,6 @@ def train(opt):
             if best_val_score is None or current_score > best_val_score:
                 best_val_score = current_score
                 best_flag = True
-            if not os.path.exists(os.path.join(opt.checkpoint_path)):
-                os.mkdir(os.path.join(opt.checkpoint_path))
             checkpoint_path = os.path.join(opt.checkpoint_path, 'model.pth')
             torch.save(model.state_dict(), checkpoint_path)
             print("model saved to {}".format(checkpoint_path))
@@ -195,7 +199,7 @@ def train(opt):
                 infos_fname = 'model-best-i{:05d}-infos.pkl'.format(iteration)
                 checkpoint_path = os.path.join(opt.checkpoint_path, model_fname)
                 torch.save(model.state_dict(), checkpoint_path)
-                print("model saved to {}".format(checkpoint_path)) 
+                print("model saved to {}".format(checkpoint_path))
                 with open(os.path.join(opt.checkpoint_path, infos_fname), 'wb') as f:
                     pickle.dump(infos, f)
 
